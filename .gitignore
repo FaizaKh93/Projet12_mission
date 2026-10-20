@@ -1,0 +1,73 @@
+# ============================================================
+# Projet 12 - Agritech Answers
+# ============================================================
+
+# ---------- Données ----------
+# Les CSV sources pèsent ~90 Mo : jamais dans git (limite GitHub = 100 Mo/fichier,
+# et un fichier commité reste dans l'historique même après suppression).
+data/
+# Exception possible si tu veux versionner de petits échantillons :
+# !data/samples/
+# !data/samples/*.csv
+
+# ---------- Modèles et artefacts ML ----------
+models/
+artifacts/
+*.pkl
+*.joblib
+*.onnx
+*.h5
+
+# ---------- MLflow ----------
+# Tracking local : volumineux et propre à ta machine.
+mlruns/
+mlartifacts/
+mlflow.db
+
+# ---------- Environnement Python ----------
+.venv/
+venv/
+env/
+# NB : .python-version et uv.lock DOIVENT être versionnés (reproductibilité) -> non ignorés.
+
+# ---------- Secrets ----------
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# ---------- Cache Python ----------
+__pycache__/
+*.py[cod]
+*.so
+.Python
+
+# ---------- Packaging ----------
+build/
+dist/
+*.egg-info/
+
+# ---------- Jupyter ----------
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ---------- Qualité de code et tests ----------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ---------- Logs ----------
+*.log
+logs/
+
+# ---------- IDE ----------
+.vscode/
+.idea/
+
+# ---------- OS ----------
+Thumbs.db
+Desktop.ini
+.DS_Store
