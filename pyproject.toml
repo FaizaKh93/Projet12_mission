@@ -1,0 +1,25 @@
+[project]
+name = "agritech-answers"
+version = "0.1.0"
+description = "Prédiction de rendement agricole et recommandation de culture — Agritech Answers"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    # Manipulation et analyse de données
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "scipy>=1.13",
+    "scikit-learn>=1.5",
+    "pyarrow>=16.0",
+    # Visualisation
+    "matplotlib>=3.8",
+    "seaborn>=0.13",
+    # Exécution des notebooks
+    "jupyterlab>=4.2",
+    "ipykernel>=6.29",
+]
+
+[tool.uv]
+# Projet non package : uv n'installe que les dépendances, pas de module a importer.
+package = false
