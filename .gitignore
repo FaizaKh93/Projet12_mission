@@ -11,12 +11,17 @@ data/
 # !data/samples/*.csv
 
 # ---------- Modèles et artefacts ML ----------
-models/
 artifacts/
 *.pkl
 *.joblib
 *.onnx
 *.h5
+
+# Exception : le modèle retenu est un livrable de la mission.
+# Le Pipeline sérialisé pèse quelques Ko, il peut être versionné sans gêne.
+models/*
+!models/.gitkeep
+!models/modele_final.joblib
 
 # ---------- MLflow ----------
 # Tracking local : volumineux et propre à ta machine.

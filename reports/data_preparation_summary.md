@@ -63,7 +63,7 @@ L'explication est une question de composition : le blé est davantage cultivé d
 
 ### Les variables ajoutées
 
-Six variables ont été créées et ajoutées au jeu de données :
+**Cinq variables** ont été créées et figurent au jeu de données livré :
 
 | Variable | Ce qu'elle apporte |
 |---|---|
@@ -71,10 +71,24 @@ Six variables ont été créées et ajoutées au jeu de données :
 | Variabilité entre pays | Régularité du rendement d'une culture selon les pays |
 | Progression historique | Tendance du rendement sur six décennies |
 | Présence au référentiel | Signale les cultures sans équivalent FAO |
-| Niveau d'intensification | Résume les deux pratiques en une échelle de 0 à 2 |
 | Faible pluie sans irrigation | Repère les parcelles en situation défavorable |
 
 Quatre autres ont été construites puis **écartées** : deux comparaient des grandeurs climatiques non comparables entre les deux sources, deux faisaient double emploi avec celles retenues. Elles restent disponibles dans le référentiel, sans encombrer le jeu d'entraînement.
+
+Une sixième — un **indice d'intensification** résumant fertilisation et irrigation sur une échelle de 0 à 2 — a été créée puis retirée du livrable. Elle valait exactement la somme des deux pratiques, et aurait empêché d'attribuer un effet à l'une plutôt qu'à l'autre (voir ci-dessous).
+
+### Deux vérifications avant de livrer
+
+**Aucune valeur extrême n'a été supprimée, et c'est un résultat.** Nous avons appliqué une recherche systématique de valeurs aberrantes à toutes les variables quantitatives des cinq fichiers. Elle ne signale rien — pour une raison structurelle : la pluviométrie et la température sont **parfaitement uniformes** (leurs déciles sont réguliers à 0,3 % près), si bien que les seuils de détection tombent en dehors même des valeurs possibles. Quant aux 28 rendements les plus élevés, ils sont exactement en nombre attendu pour un aléa normal — 2 660 observations écartées de plus de trois écarts-types, contre 2 699 attendues. **Ce sont des valeurs rares, pas des erreurs** : les retirer aurait biaisé le modèle vers la moyenne.
+
+**Deux colonnes ont été retirées, chacune pour un motif précis.** Nous avons mesuré la redondance sur l'ensemble des variables numériques, puis étendu l'analyse aux variables qualitatives — nécessaire, car le type de culture détermine entièrement quatre des colonnes construites, ce qu'une analyse purement numérique ne voit pas.
+
+| Colonne retirée | Motif |
+|---|---|
+| **Indice d'intensification** | Doublon exact de la fertilisation et de l'irrigation réunies |
+| **Durée jusqu'à récolte** | Probablement inconnue de l'agriculteur au moment où il interroge l'application, pour un pouvoir explicatif nul |
+
+Toutes les autres ont été conservées : leur utilité réelle a été **mesurée à l'entraînement**, à l'étape suivante, plutôt que présumée ici.
 
 ---
 
@@ -159,6 +173,8 @@ Ce choix est **métier avant d'être technique**, et il doit être tranché avan
 
 **À ce stade, aucune des deux n'a été appliquée.** Le fichier livré contient les rendements exactement tels qu'ils figurent dans les données d'origine, sans aucune correction. Ce choix reste entier pour l'étape de modélisation.
 
+> **Suite donnée.** L'étape 2 a tranché pour l'**option B**, en mesurant l'écart de rendement entre cultures à conditions de parcelle identiques : 1,29 €/ha, contre 80 €/ha d'incertitude du modèle — un rapport de 1 à 62 — et un classement identique sur 100 % des parcelles. Le détail figure au rapport de modélisation, section 4.
+
 ---
 
 ## 5. Limites à porter au rapport final
@@ -169,7 +185,7 @@ Ce choix est **métier avant d'être technique**, et il doit être tranché avan
 
 **Les mesures climatiques des deux sources ne sont pas comparables.** La température des parcelles s'étend de 15 à 40 °C, celle du référentiel FAO est une moyenne annuelle nationale. 38 % des parcelles sont plus chaudes que la moyenne annuelle du pays le plus chaud du monde : les deux grandeurs ne mesurent pas la même chose, et nous nous sommes interdit de les croiser.
 
-**Une question reste ouverte pour le métier** : la durée jusqu'à récolte est-elle connue au moment du semis, ou seulement constatée après ? Dans le second cas, l'application ne pourrait pas la demander à l'utilisateur. Son effet sur le rendement étant nul, l'enjeu est faible — mais la question mérite réponse.
+**La durée jusqu'à récolte a été écartée par prudence.** Nous ignorons si elle est connue au moment du semis ou seulement constatée après coup — dans le second cas, l'application ne pourrait pas la demander à l'utilisateur. Son effet sur le rendement étant nul, la conserver aurait fait courir ce risque sans aucune contrepartie. **La question reste néanmoins à poser au métier** : si la durée est bien connue à l'avance, elle pourrait être réintroduite — sans attente particulière, puisqu'elle n'explique rien.
 
 ---
 
@@ -177,7 +193,7 @@ Ce choix est **métier avant d'être technique**, et il doit être tranché avan
 
 | Livrable | Contenu |
 |---|---|
-| **Jeu de données consolidé** | 999 769 parcelles, 16 variables — source de vérité pour l'entraînement |
+| **Jeu de données consolidé** | 999 769 parcelles, 14 variables — source de vérité pour l'entraînement |
 | Dictionnaire des variables | Origine, unité, signification et usage prévu de chaque colonne |
 | Référentiel par culture | Indicateurs FAO, destinés à l'application |
 | Panel historique FAO | 56 709 observations nettoyées, pour les analyses ultérieures |
