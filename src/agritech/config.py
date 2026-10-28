@@ -120,6 +120,36 @@ FEATURES_MODELE = (
 
 NUMERIC_COLUMNS = [*NUMERIC_FEATURES, TARGET]  # quantitatives + cible, pour l'EDA
 
+# --------------------------------------------------------------------------- #
+# Contrat d'entrée de l'API
+#
+# Ces valeurs sont **observées sur `train`**, pas décrétées. Un test de la
+# suite vérifie qu'elles coïncident avec les modalités de l'encodeur ajusté :
+# une mise à jour du modèle qui changerait le vocabulaire ferait échouer les
+# tests au lieu de laisser le contrat diverger en silence.
+# --------------------------------------------------------------------------- #
+
+# L'API doit **rejeter** une modalité inconnue, pas l'accepter. Le
+# transformateur substitue une sentinelle aux champs facultatifs *non
+# renseignés* ; si une valeur invalide lui parvenait, elle serait traitée comme
+# une information absente — une faute de frappe deviendrait une omission
+# silencieuse.
+MODALITES_CATEGORIELLES = {
+    "Crop": ("Barley", "Cotton", "Maize", "Rice", "Soybean", "Wheat"),
+    "Region": ("East", "North", "South", "West"),
+    "Soil_Type": ("Chalky", "Clay", "Loam", "Peaty", "Sandy", "Silt"),
+    "Weather_Condition": ("Cloudy", "Rainy", "Sunny"),
+}
+
+# Domaine de validité du modèle. Au-delà, Ridge **extrapole linéairement**
+# sans aucun garde-fou : rien ne plafonne la prédiction, et l'erreur n'est plus
+# celle qui a été mesurée. L'API avertit donc, mais ne refuse pas — une saison
+# plus humide que toutes celles observées reste une question légitime.
+DOMAINE_ENTRAINEMENT = {
+    "Rainfall_mm": (100.0, 1000.0),
+    "Temperature_Celsius": (15.0, 40.0),
+}
+
 # Correspondance des vocabulaires de cultures entre les deux jeux
 CROP_MAPPING = {
     "Maize": "Maize",
@@ -156,19 +186,86 @@ MLARTIFACTS_DIR = PROJECT_ROOT / "mlartifacts"
 # Une seule expérience : les quatre modèles sur les treize variables.
 EXPERIMENT_NOM = "agritech-rendement"
 
-# Nom sous lequel les modèles sont publiés au **registre** MLflow. Un seul nom,
-# une version par modèle entraîné : le registre représente l'emplacement unique
-# « le modèle de rendement en service », et les versions en sont les candidats.
+# Nom sous lequel les modèles **entraînés** sont publiés au registre MLflow :
+# une version par modèle étudié à l'étape 2, et l'alias `champion` sur celui
+# que la comparaison multicritère a retenu. Ces versions attendent toutes les
+# 13 colonnes du dataset consolidé.
 REGISTERED_MODEL_NAME = "agritech-rendement"
 
+# L'artefact **de service** est publié sous un second nom, parce qu'il n'a pas
+# le même contrat d'entrée : il n'attend que les 8 saisies de l'agriculteur, le
+# transformateur de dérivation reconstituant les 5 autres. Les réunir sous un
+# même nom donnerait un registre dont les versions ne sont pas interchangeables.
+# Séparés, chaque nom garde un contrat stable et son alias `champion` désigne
+# une décision distincte : le modèle retenu par la comparaison d'un côté,
+# l'artefact servi par l'API de l'autre.
+REGISTERED_MODEL_API = "agritech-rendement-api"
+
 # MLflow 3 a supprimé les *stages* (`Staging`, `Production`) au profit des
-# **alias**. L'API chargera `models:/agritech-rendement@champion` : changer de
-# modèle en production reviendra à déplacer cet alias, sans toucher à son code
-# ni redéployer quoi que ce soit.
+# **alias**. Déplacer un alias suffit à changer ce qu'il désigne, sans toucher
+# au code qui le charge ni redéployer quoi que ce soit.
 ALIAS_CHAMPION = "champion"
 
 MODELS_DIR = PROJECT_ROOT / "models"
 FINAL_MODEL_PATH = MODELS_DIR / "modele_final.joblib"
+
+# Artefact déployé : le Pipeline de service, gelé, dans un fichier autonome.
+# C'est lui que l'image Docker embarque. Le conteneur ne consulte pas le
+# registre à son démarrage — il sert un fichier figé au moment de la
+# construction de l'image, ce qui le rend sans état et démarrable sans réseau.
+API_MODEL_PATH = MODELS_DIR / "modele_api.joblib"
+
+# Provenance de l'artefact ci-dessus, écrite à côté de lui par le script
+# d'export. Elle existe parce que l'image n'embarque pas mlflow : sans ce
+# fichier, le conteneur servirait un modèle sans pouvoir dire d'où il vient.
+# C'est la source de `/model/info` quand le modèle ne vient pas du registre.
+API_METADATA_PATH = MODELS_DIR / "modele_api.json"
+
+# Demi-largeur de l'**intervalle de prédiction** à 95 % — l'intervalle qui doit
+# couvrir le rendement d'une parcelle nouvelle, et non un intervalle de
+# confiance autour d'une moyenne : les deux ne mesurent pas la même chose.
+#
+# Obtenue par les **quantiles empiriques des résidus sur `val`** (−0,9792 et
+# +0,9785), pas par une formule gaussienne. Couverture mesurée sur `test`, qui
+# n'entre dans aucun calcul de calibration : **94,92 %** pour 95 % nominal.
+# Elle tient par culture (94,73 % à 95,01 %, étendue 0,28 point), aux déciles
+# extrêmes de pluie et de température, et sur les parcelles sèches sans
+# intrants (95,27 %).
+#
+# Une seule largeur suffit parce que la variance des résidus est constante :
+# l'écart-type par décile de prédiction varie de 1,5 %. La borne basse est
+# tronquée à zéro, un rendement ne pouvant être négatif.
+#
+# **Réserve.** Les données sont simulées avec un bruit gaussien ; cet
+# intervalle en mesure fidèlement la dispersion. Sur des parcelles réelles, il
+# devrait être recalibré, et la normalité parfaite des résidus ne s'y
+# observerait pas.
+DEMI_INTERVALLE_PREDICTION_95_T_HA = 0.979
+
+# Seuil au-dessous duquel un écart de rendement entre cultures n'est pas
+# exploitable pour décider. C'est une **convention métier annoncée**, pas un
+# seuil de significativité : elle ne se déduit ni du RMSE, ni de l'intervalle
+# de prédiction.
+#
+# Pourquoi 0,1 t/ha, soit 100 kg/ha :
+#   - c'est l'ordre de grandeur de ce qu'une pesée de récolte réelle peut
+#     distinguer, une fois comptées les variations d'humidité, les pertes au
+#     battage et l'hétérogénéité intraparcellaire ;
+#   - valorisé aux prix à la production observés (213 à 508 €/t pour nos six
+#     cultures), cela représente 21 à 51 €/ha — en dessous de la précision de
+#     n'importe quel budget prévisionnel.
+#
+# Attention à ce qu'elle ne dit PAS : deux prédictions séparées par moins que
+# ce seuil ne sont pas « statistiquement indiscernables ». La significativité
+# des écarts entre cultures **n'a pas été évaluée formellement** dans ce
+# projet, et ce seuil n'en tient pas lieu : il borne la portée *pratique*
+# d'un écart, pas sa détectabilité.
+#
+# L'évaluer demanderait la covariance des coefficients sous pénalisation
+# Ridge, dans un plan où les 4 indicateurs FAO sont des fonctions exactes de
+# `Crop`, donc colinéaires au bloc one-hot. Une erreur-type OLS sur deux
+# groupes n'y répond pas, et le seuil ci-dessus ne prétend pas y répondre.
+SEUIL_ECART_RENDEMENT_PERTINENT_T_HA = 0.1
 
 # Budget par étude Optuna ; ~2 s par ajustement sur 700 000 lignes
 OPTUNA_N_TRIALS = 100
@@ -194,6 +291,62 @@ COUT_SOUSESTIMATION = 1.0
 # Identifiant des hypothèses ci-dessus, journalisé dans MLflow : deux runs
 # calculés sous des hypothèses différentes ne sont pas comparables.
 HYPOTHESES_ECONOMIQUES_VERSION = "v1-2026-10"
+
+# --------------------------------------------------------------------------- #
+# Prix de référence à la production
+#
+# Les deux jeux de données du projet ne contiennent aucun prix. Ces valeurs
+# viennent donc de l'extérieur : FAOSTAT, domaine *Producer Prices*, élément
+# 5532 « Producer Price (USD/tonne) », année 2024, converti au taux annuel
+# moyen BCE.
+#
+# **Ce qu'elles sont** : une médiane entre pays déclarants, destinée à
+# pré-remplir le champ `price_eur_t` des budgets de `/recommend` plutôt que de
+# laisser l'utilisateur devant une case vide.
+#
+# **Ce qu'elles ne sont pas** : le prix de la parcelle de l'utilisateur. Les
+# quartiles sont conservés précisément pour que cela se voie — l'écart
+# interquartile du maïs va de 186 à 432 €/t, un facteur 2,3, bien plus large
+# que la variation de ±20 % testée par `/recommend`.
+#
+# **Elles ne suffisent pas à calculer une marge** : les charges opérationnelles
+# manquent, et c'est délibéré. Prix mondiaux FAO combinés à des charges
+# européennes donnent des marges négatives sur trois cultures sur quatre.
+#
+# `scripts/build_reference_prices.py` les re-dérive depuis un export FAOSTAT et
+# vérifie qu'elles n'ont pas dérivé.
+# --------------------------------------------------------------------------- #
+
+PRIX_REFERENCE_SOURCE = {
+    "source": "FAOSTAT",
+    "jeu_de_donnees": "Producer Prices (PP), All Data (Normalized)",
+    "element": "Producer Price (USD/tonne) — code 5532",
+    "annee": 2024,
+    "methode": "médiane des pays déclarants, agrégats exclus",
+    "conversion": "USD vers EUR au taux annuel moyen BCE 2024",
+    "taux_usd_par_eur": 1.08238,
+    "extrait_le": "2026-10-28",
+}
+
+#: Prix médian et quartiles, en euros par tonne. `item_faostat` est orthographié
+#: **comme dans les données**, qui diffèrent du fichier de codes : celui-ci
+#: écrit « Seed cotton; unginned » avec un point-virgule là où les données
+#: mettent une virgule. Un filtre construit sur le fichier de codes ne renvoie
+#: aucune ligne — sans lever d'erreur.
+PRIX_REFERENCE_FAOSTAT = {
+    "Barley": {"prix_eur_t": 213, "q1_eur_t": 171, "q3_eur_t": 284,
+               "pays": 60, "item_faostat": "Barley"},
+    "Cotton": {"prix_eur_t": 508, "q1_eur_t": 449, "q3_eur_t": 655,
+               "pays": 11, "item_faostat": "Seed cotton, unginned"},
+    "Maize": {"prix_eur_t": 267, "q1_eur_t": 186, "q3_eur_t": 432,
+              "pays": 75, "item_faostat": "Maize (corn)"},
+    "Rice": {"prix_eur_t": 423, "q1_eur_t": 353, "q3_eur_t": 695,
+             "pays": 45, "item_faostat": "Rice"},
+    "Soybean": {"prix_eur_t": 450, "q1_eur_t": 409, "q3_eur_t": 690,
+                "pays": 36, "item_faostat": "Soya beans"},
+    "Wheat": {"prix_eur_t": 225, "q1_eur_t": 190, "q3_eur_t": 328,
+              "pays": 67, "item_faostat": "Wheat"},
+}
 
 # --------------------------------------------------------------------------- #
 # Palette graphique

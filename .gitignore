@@ -22,6 +22,10 @@ artifacts/
 models/*
 !models/.gitkeep
 !models/modele_final.joblib
+# L'artefact de service et sa provenance : l'image Docker les copie au build,
+# et une CI n'a pas accès au registre MLflow local. 7 Ko à eux deux.
+!models/modele_api.joblib
+!models/modele_api.json
 
 # ---------- MLflow ----------
 # Tracking local : volumineux et propre à ta machine.
@@ -63,6 +67,13 @@ dist/
 .coverage
 htmlcov/
 .tox/
+
+# ---------- Couverture de code ----------
+# Sorties regenerables : `uv run pytest --cov` les reproduit.
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
 
 # ---------- Logs ----------
 *.log

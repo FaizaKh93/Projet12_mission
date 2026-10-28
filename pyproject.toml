@@ -5,31 +5,125 @@ description = "Prédiction de rendement agricole et recommandation de culture �
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 
+# Noyau d'inférence : tout ce que `import agritech` exige, et rien de plus.
+# C'est ce bloc, et lui seul, qui part dans l'image Docker de l'API.
 dependencies = [
-    # Manipulation et analyse de données
     "pandas>=2.2",
     "numpy>=1.26",
-    "scipy>=1.13",
-    "scikit-learn>=1.5",
-    "pyarrow>=16.0",
-    # Visualisation
-    "matplotlib>=3.8",
-    "seaborn>=0.13",
-    # Exécution des notebooks
-    "jupyterlab>=4.2",
-    "ipykernel>=6.29",
-    # Suivi d'expériences et modélisation (étape 2)
+    "scikit-learn>=1.6",   # FrozenEstimator est apparu en 1.6
+    "joblib>=1.4",         # chargement de l'artefact déployé
+]
+
+# --------------------------------------------------------------------------- #
+# Groupes locaux (PEP 735) : installés sur le poste, jamais publiés, jamais
+# dans l'image.
+#
+# Les bornes ci-dessous expriment **ce dont le code a besoin**. Les versions
+# effectives sont figées par `uv.lock`, et c'est le lock — pas ces bornes —
+# qui est propagé à l'image et à l'artefact MLflow via `uv export`. Une borne
+# basse ne garantit pas qu'un pickle se recharge : seul un pin exact le fait.
+# --------------------------------------------------------------------------- #
+
+[dependency-groups]
+# Service HTTP. Ces trois paquets sont déjà dans le lock — mlflow en dépend —
+# donc les déclarer ici ne déplace aucune version.
+api = [
+    "fastapi>=0.159",
+    "uvicorn>=0.54",
+    "pydantic>=2.14",
+]
+
+# Ce qu'il faut **en plus du noyau** pour désérialiser l'artefact du registre,
+# sérialisé en cloudpickle. Liste volontairement distincte de `api` : l'API
+# charge un `.joblib` (pickle standard) et n'a pas besoin de cloudpickle, là
+# où l'artefact MLflow en a besoin sans rien connaître de FastAPI.
+artefact = [
+    "cloudpickle>=3.1",
+]
+
+# Entraînement, optimisation, suivi d'expériences.
+train = [
     "mlflow>=3.17",
     "lightgbm>=4.7",
     "optuna>=5.0",
-    # Interprétabilité : contributions par variable
-    "shap>=0.54",
+    "shap>=0.54",          # interprétabilité
+    "pyarrow>=16.0",       # lecture des partitions Parquet
+    "scipy>=1.13",         # tests statistiques du notebook de comparaison
+]
+
+# Exploration et figures.
+notebooks = [
+    "jupyterlab>=4.2",
+    "ipykernel>=6.29",
+    "matplotlib>=3.8",
+    "seaborn>=0.13",
+]
+
+# Les tests lisent les partitions Parquet et importent `agritech.training` :
+# ils dépendent donc du groupe d'entraînement, d'où l'inclusion plutôt qu'une
+# recopie de `pyarrow`.
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=7.1",
+    # Client de `fastapi.testclient`. Starlette 1.9 reclame httpx2 et deprecie
+    # httpx ; sans cette ligne il n'arrive ici que par JupyterLab, c'est-a-dire
+    # hors du groupe de test.
+    "httpx2>=2.16",
+    {include-group = "train"},
 ]
 
 [build-system]
 requires = ["uv_build>=0.11.29,<0.12.0"]
 build-backend = "uv_build"
 
+[tool.uv]
+# `uv sync` sans option installe donc l'environnement de travail complet, API
+# comprise. L'image Docker, elle, n'installe aucun de ces groupes :
+#   uv export --no-default-groups --group api --no-emit-project --no-hashes
+default-groups = ["api", "dev", "notebooks"]
+
 [tool.uv.build-backend]
 # Le paquet s'appelle `agritech`, pas `agritech_answers` deduit du nom du projet
 module-name = "agritech"
+
+[tool.pytest.ini_options]
+# `api/` vit a la racine et n'est pas installe dans l'environnement : uvicorn
+# le trouve par le repertoire courant, mais pytest n'insere que le dossier du
+# fichier de test dans sys.path. Sans cette ligne, `from api import service`
+# echoue a la collecte.
+pythonpath = ["."]
+
+# --------------------------------------------------------------------------- #
+# Couverture de code
+#
+# Le perimetre est **le code qui part dans le conteneur** : l'API et les deux
+# modules qu'elle embarque. `training.py` et `evaluation.py` en sont exclus,
+# non pour flatter le taux, mais parce qu'ils s'executent lors d'un
+# entrainement — pilotes par MLflow et Optuna — et non sous pytest. Les melanger
+# donnerait un chiffre global qui ne mesure ni le service ni la chaine
+# d'entrainement. Sans cette exclusion, le total tombe a 76 % sans que rien
+# du service ne soit moins bien teste.
+#
+# `branch = true` : les branches comptent, pas seulement les lignes. Une
+# condition dont un seul cote est emprunte n'est pas couverte.
+# --------------------------------------------------------------------------- #
+
+[tool.coverage.run]
+source = ["api", "agritech"]
+branch = true
+omit = [
+    "*/agritech/training.py",
+    "*/agritech/evaluation.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+# Les lignes qu'il serait trompeur de compter : un bloc `__main__` n'est
+# jamais atteint sous pytest, et un `TYPE_CHECKING` ne s'execute jamais.
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
