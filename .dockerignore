@@ -1,0 +1,73 @@
+# Ce qui ne doit pas entrer dans le contexte de construction.
+#
+# Deux raisons, d'inégale importance. La première est la taille : le contexte
+# est envoyé au démon avant la moindre instruction, et `data/` pèse plusieurs
+# centaines de méga-octets. La seconde est la **confidentialité** : tout ce qui
+# figure ici pourrait finir dans une couche d'image, donc être redistribué avec
+# elle. Les données d'entraînement n'ont rien à faire dans une image de service.
+#
+# Ce fichier est permissif par défaut et exclut explicitement : le Dockerfile
+# ne copie que `src/`, `api/` et deux fichiers de `models/`, donc une omission
+# ici alourdit le contexte sans polluer l'image.
+
+# --- Données et artefacts lourds ------------------------------------------- #
+data/
+mlruns/
+mlartifacts/
+mlflow.db
+mlflow.db-journal
+
+# Tous les modèles sauf les deux que l'API sert. `modele_final.joblib` est le
+# modèle d'entraînement, inutile ici ; les autres vont jusqu'à 1,3 Mo.
+models/*
+!models/modele_api.joblib
+!models/modele_api.json
+
+# --- Environnements ---------------------------------------------------------#
+# Un venv est lié à sa plateforme : celui de Windows ne fonctionnerait pas dans
+# une image Linux, et uv en construit un neuf de toute façon.
+.venv/
+venv/
+env/
+
+# --- Exploration et rapports ----------------------------------------------- #
+notebooks/
+reports/
+docs/
+
+# --- Tests et outillage ---------------------------------------------------- #
+tests/
+scripts/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# --- Caches Python --------------------------------------------------------- #
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# --- Historique et outils de développement --------------------------------- #
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+.claude/
+*.log
+
+# --- Le Dockerfile lui-même et ses annexes --------------------------------- #
+# Les copier dans l'image invaliderait le cache à chaque retouche de commentaire.
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# --- Fichiers d'environnement ---------------------------------------------- #
+# Jamais dans une image : une image se partage, un secret non.
+.env
+.env.*

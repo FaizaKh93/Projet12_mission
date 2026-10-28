@@ -75,20 +75,28 @@ L'étape 1 avait laissé deux voies ouvertes — injecter une référence extern
 |---|---|
 | Écart de rendement entre meilleure et pire culture | **0,0065 t/ha** |
 | Soit, en valeur | **1,29 €/ha** |
-| À comparer à l'erreur du modèle | **80 €/ha** |
-| Rapport | **1 pour 62** |
+| Seuil de pertinence pratique du prototype | **0,1 t/ha** (100 kg/ha) |
+| Rapport de l'écart à ce seuil | **1 pour 15** |
 
 ![Les six cultures sont indiscernables](figures/cultures_indiscernables.png)
 
 *Attention à l'échelle : elle couvre un dixième de tonne par hectare. Les six cultures y tiennent toutes, et leurs marges d'incertitude se recouvrent.*
 
-Le gain théorique d'un changement de culture est **62 fois plus petit que l'incertitude du conseil lui-même**. Autrement dit, la recommandation serait noyée dans sa propre marge d'erreur.
+Le gain théorique d'un changement de culture est **quinze fois plus petit que le seuil de pertinence pratique retenu pour ce prototype** — 0,1 t/ha, soit l'ordre de grandeur de ce qu'une pesée de récolte distingue réellement, une fois comptées l'humidité, les pertes au battage et l'hétérogénéité de la parcelle.
 
-Un second constat achève la démonstration : **le classement est constant**. L'orge arrive en tête sur 100 % des parcelles, quelles que soient les conditions. Un conseil qui ne dépend pas de la situation de l'agriculteur n'est pas un conseil.
+Ce seuil est une **convention de décision annoncée**, ni une norme agronomique universelle, ni un test de significativité : la significativité statistique des écarts entre cultures n'a pas été évaluée dans ce projet, et la conclusion ne repose pas sur elle.
 
-Enfin, nous avons vérifié que retirer purement et simplement l'information « culture » du modèle — la variété elle-même et les quatre indicateurs de référence construits à l'étape 1 — **ne dégrade rien**. Elle n'apporte aucune information exploitable.
+Un second constat porte sur le modèle lui-même : **le classement est constant**. L'orge arrive en tête sur 100 % des parcelles, quelles que soient les conditions.
 
-**Conséquence pour l'application** : elle sera présentée comme un **estimateur de rendement**, pas comme un conseiller de culture. Et le message métier n'est pas un aveu d'échec — c'est une réorientation : *le levier n'est pas le choix de la culture, il est dans la fertilisation et l'irrigation, dans un rapport de 1 à 232*.
+Ce n'est pas une découverte expérimentale, et il faut le dire : le modèle retenu étant **strictement additif**, sans aucun terme d'interaction entre la culture et les conditions de la parcelle, la contribution de la culture est une constante qui ne dépend pas du contexte. Le classement *ne pouvait pas* varier. C'est une propriété de la classe de modèle, garantie d'avance.
+
+Correctement énoncé, le fait est d'ailleurs plus fort : un modèle additif est **structurellement incapable** d'adapter son conseil à la parcelle, et aucune quantité de données n'y changerait rien. Un conseil qui ne dépend pas de la situation de l'agriculteur n'est pas un conseil. Cela ne dit pas que les cultures réelles n'interagissent pas avec leur environnement — cela dit que ce modèle ne peut pas représenter une telle interaction.
+
+Enfin — et c'est le résultat qui porte la conclusion — nous avons vérifié que retirer purement et simplement l'information « culture » du modèle — la variété elle-même et les quatre indicateurs de référence construits à l'étape 1 — **ne dégrade pas la prédiction**. Aucun gain prédictif n'est détecté dans nos expériences.
+
+Ce constat ne prouve pas qu'aucun effet cultural n'existe en agriculture réelle. Il établit que **ces** données, traitées par **ce** modèle, n'en portent aucune trace exploitable.
+
+**Conséquence pour l'application** : elle sera présentée comme un **estimateur de rendement**, pas comme un conseiller de culture. Et le message métier n'est pas un aveu d'échec — c'est une réorientation : *dans ce modèle, la fertilisation pèse 232 fois plus que l'écart maximal entre cultures*. Les deux grandeurs sont des contributions **prédictives** estimées sur des données simulées, non des effets agronomiques démontrés : le rapport dit où se situe le signal dans le modèle, pas ce qu'un apport d'engrais produirait sur une parcelle réelle.
 
 ---
 

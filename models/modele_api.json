@@ -1,0 +1,32 @@
+{
+ "registre": "agritech-rendement-api",
+ "version": 2,
+ "alias": "champion",
+ "modele": "ridge",
+ "registre_source": "agritech-rendement",
+ "version_source": "2",
+ "run_source": "265a884eaed7478fb37e8f5ff4a18f7f",
+ "schema_entree": "8-saisies",
+ "data_version": "c9547cbd218b",
+ "split_version": "ccb2a631078f",
+ "hypotheses_economiques": "v1-2026-10",
+ "sklearn_version": "1.9.1",
+ "pandas_version": "3.0.6",
+ "numpy_version": "2.5.4",
+ "artefact_sha256": "87f945231a473c849c2b10765c8e262636c4a7434265de47fbd6a6521c129673",
+ "saisies_obligatoires": [
+  "Rainfall_mm",
+  "Temperature_Celsius",
+  "Fertilizer_Used",
+  "Irrigation_Used",
+  "Crop"
+ ],
+ "saisies_facultatives": [
+  "Region",
+  "Soil_Type",
+  "Weather_Condition"
+ ],
+ "exporte_le": "2026-10-28T09:41:45+00:00",
+ "alias_precedent": null,
+ "promu_le": "2026-10-28T09:42:32+00:00"
+}
