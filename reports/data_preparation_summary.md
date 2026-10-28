@@ -173,7 +173,7 @@ Ce choix est **métier avant d'être technique**, et il doit être tranché avan
 
 **À ce stade, aucune des deux n'a été appliquée.** Le fichier livré contient les rendements exactement tels qu'ils figurent dans les données d'origine, sans aucune correction. Ce choix reste entier pour l'étape de modélisation.
 
-> **Suite donnée.** L'étape 2 a tranché pour l'**option B**, en mesurant l'écart de rendement entre cultures à conditions de parcelle identiques : 1,29 €/ha, contre 80 €/ha d'incertitude du modèle — un rapport de 1 à 62 — et un classement identique sur 100 % des parcelles. Le détail figure au rapport de modélisation, section 4.
+> **Suite donnée.** L'étape 2 a tranché pour l'**option B**, sur deux résultats. Retirer l'information « culture » du modèle ne dégrade pas la prédiction : aucun gain prédictif n'est détecté. Et l'écart de rendement entre cultures, à conditions de parcelle identiques, vaut 0,0065 t/ha — soit 6,5 kg/ha, quinze fois moins que le seuil de pertinence pratique de 0,1 t/ha retenu pour le prototype. Le détail figure au rapport de modélisation, section 4.
 
 ---
 
