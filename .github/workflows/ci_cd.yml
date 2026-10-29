@@ -56,16 +56,17 @@ jobs:
   # ========================================================================= #
   #  C I  —  I N T É G R A T I O N   C O N T I N U E
   #
-  #  Trois contrôles, déclenchés à chaque poussée et à chaque proposition de
-  #  fusion. Le troisième se prolonge en CD sur `main` : voir sa bannière.
+  #  Un seul job pour tout ce qui s'éprouve à partir des sources : tests,
+  #  couverture, et concordance des dépendances livrées. Le job suivant
+  #  construit l'image, l'éprouve, et se prolonge en CD — voir sa bannière.
   # ========================================================================= #
 
-  # --- CI 1/3 : la suite de tests, sur Linux alors qu'on développe sous
-  #              Windows. C'est la première chose que cette chaîne prouve.
-  tests:
-    name: CI · Tests
+  # --- CI : les tests tournent sur Linux alors qu'on développe sous Windows.
+  #     C'est la première chose que cette chaîne prouve.
+  controles:
+    name: CI · Contrôles
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v7
@@ -94,6 +95,61 @@ jobs:
           uv run --no-sync pytest -q -rs \
             --cov --cov-report=term-missing --cov-fail-under=90 \
             | tee resultat-pytest.txt
+
+      # Les deux `requirements.txt` sont des livrables exigés par le cahier des
+      # charges, mais `uv.lock` reste la seule source de vérité.
+      #
+      # `if: always()` : une suite de tests rouge ne doit pas empêcher ce
+      # contrôle de rendre son verdict. Les deux sont indépendants.
+      #
+      # `--locked` est vital : sans lui, `uv export` régénère un lock périmé et
+      # compare contre lui — le contrôle masquerait la dérive qu'il cherche. La
+      # comparaison ignore les commentaires : `uv export` y écrit le chemin de
+      # sortie, différent entre les deux fichiers.
+      - name: Vérifier les dépendances livrées
+        id: derive
+        if: always()
+        run: |
+          derive=0
+          verifier() {
+            uv export --locked --no-default-groups --group "$1" \
+              --no-emit-project --no-hashes --format requirements.txt \
+              -o "/tmp/attendu-$1.txt"
+            if diff <(grep -v '^#' "/tmp/attendu-$1.txt") \
+                    <(grep -v '^#' "$2") > "/tmp/diff-$1.txt"; then
+              echo "OK      $2"
+            else
+              echo "DÉRIVE  $2"
+              cat "/tmp/diff-$1.txt"
+              derive=1
+            fi
+          }
+          verifier api requirements.txt
+          verifier ui app/requirements.txt
+          exit $derive
+
+      # La condition porte sur le pas précédent, et non sur `failure()` : dans
+      # un job unique, `failure()` serait aussi vrai après un échec de pytest,
+      # et annoncerait une dérive là où il n'y en a aucune.
+      #
+      # Texte entièrement fixe : `cat <<'FIN'` recopie tout jusqu'à la ligne
+      # `FIN` telle quelle. Le délimiteur entre guillemets interdit toute
+      # substitution, donc les accents graves restent des accents graves.
+      # On lit ici exactement ce qui s'affichera.
+      - name: Expliquer la dérive
+        if: always() && steps.derive.outcome == 'failure'
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'FIN'
+          ## CI · Dépendances livrées
+
+          Un `requirements.txt` ne correspond plus à `uv.lock`.
+          Il ne s'édite pas à la main, il se régénère :
+
+          ```bash
+          uv export --no-default-groups --group api --no-emit-project --no-hashes --format requirements.txt -o requirements.txt
+          uv export --no-default-groups --group ui  --no-emit-project --no-hashes --format requirements.txt -o app/requirements.txt
+          ```
+          FIN
 
       # Écrire le compte rendu lisible dans l'onglet Actions.
       #
@@ -136,73 +192,14 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # --- CI 2/3 : les deux `requirements.txt` sont des livrables exigés, mais
-  #              `uv.lock` reste la seule source de vérité.
-  requirements:
-    name: CI · Dépendances livrées
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Installer uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
-        with:
-          version: ${{ env.VERSION_UV }}
-          python-version: ${{ env.VERSION_PYTHON }}
-
-      # `--locked` est vital : sans lui, `uv export` régénère un lock périmé
-      # et compare contre lui — le contrôle masquerait la dérive qu'il
-      # cherche. La comparaison ignore les commentaires : `uv export` y écrit
-      # le chemin de sortie, différent entre les deux fichiers.
-      - name: Vérifier l'absence de dérive
-        run: |
-          derive=0
-          verifier() {
-            uv export --locked --no-default-groups --group "$1" \
-              --no-emit-project --no-hashes --format requirements.txt \
-              -o "/tmp/attendu-$1.txt"
-            if diff <(grep -v '^#' "/tmp/attendu-$1.txt") \
-                    <(grep -v '^#' "$2") > "/tmp/diff-$1.txt"; then
-              echo "OK      $2"
-            else
-              echo "DÉRIVE  $2"
-              cat "/tmp/diff-$1.txt"
-              derive=1
-            fi
-          }
-          verifier api requirements.txt
-          verifier ui app/requirements.txt
-          exit $derive
-
-      # Texte entièrement fixe : `cat <<'FIN'` recopie tout jusqu'à la ligne
-      # `FIN` telle quelle. Le délimiteur entre guillemets interdit toute
-      # substitution, donc les accents graves restent des accents graves.
-      # On lit ici exactement ce qui s'affichera.
-      - name: Expliquer la dérive
-        if: failure()
-        run: |
-          cat >> "$GITHUB_STEP_SUMMARY" <<'FIN'
-          ## CI · Dépendances livrées
-
-          Un `requirements.txt` ne correspond plus à `uv.lock`.
-          Il ne s'édite pas à la main, il se régénère :
-
-          ```bash
-          uv export --no-default-groups --group api --no-emit-project --no-hashes --format requirements.txt -o requirements.txt
-          uv export --no-default-groups --group ui  --no-emit-project --no-hashes --format requirements.txt -o app/requirements.txt
-          ```
-          FIN
-
-  # --- CI 3/3, prolongé en CD : l'image est construite une seule fois,
-  #     éprouvée, puis publiée. Deux jobs séparés auraient imposé une seconde
+  # --- CI, prolongé en CD : l'image est construite une seule fois, éprouvée,
+  #     puis publiée. Deux jobs séparés auraient imposé une seconde
   #     construction, dont rien ne garantirait formellement l'identité.
   image:
     name: CI · Image et conteneur → CD · Publication
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    needs: [tests, requirements]
+    needs: [controles]
 
     env:
       LOCALE: agritech-api:ci
