@@ -13,9 +13,21 @@
 name: CI/CD
 
 on:
+  # Toute poussée, sur n'importe quelle branche. `'**'` traverse les barres
+  # obliques, donc `feat/...` et `dependabot/uv/...` sont couvertes. Sans ce
+  # filtre, `push` se déclencherait aussi sur les étiquettes de version.
   push:
-    branches: [main]
+    branches: ['**']
+
+  # `synchronize` (un commit poussé sur une branche déjà proposée à la fusion)
+  # est gardé sciemment : il produit une seconde exécution, qui n'éprouve pas
+  # la branche mais `refs/pull/N/merge`, le résultat de la fusion dans `main`.
+  # Deux objets différents, donc deux vérifications — le doublon est voulu.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+  # Le bouton « Run workflow » n'apparaîtra qu'une fois ce fichier sur `main` :
+  # GitHub ne lit cet événement que depuis la branche par défaut.
   workflow_dispatch:
 
 # Une nouvelle poussée annule l'exécution précédente, sauf sur `main` où une
