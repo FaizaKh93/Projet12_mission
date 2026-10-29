@@ -40,6 +40,7 @@ from agritech.config import (
     MODALITES_CATEGORIELLES,
     PRIX_REFERENCE_SOURCE,
     SEUIL_ECART_RENDEMENT_PERTINENT_T_HA,
+    TRAIN_PATH,
 )
 from agritech.preprocessing import (
     FEATURES_FACULTATIVES,
@@ -258,6 +259,11 @@ def test_artefact_attend_les_huit_saisies(artefact):
     assert list(derivation.feature_names_in_) == list(FEATURES_SAISIES)
 
 
+# Ce contrôle confronte la configuration au dataset : il n'a de sens que là
+# où le dataset existe. Absent du runner, il est ignoré — pas supprimé.
+@pytest.mark.skipif(not TRAIN_PATH.exists(),
+                    reason="partitions absentes : bornes vérifiées dans "
+                           "l'environnement MLOps")
 def test_domaine_declare_encadre_les_donnees_vues():
     """Les bornes de `config.py` sont celles du jeu d'entraînement.
 

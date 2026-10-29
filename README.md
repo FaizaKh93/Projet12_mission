@@ -1,5 +1,7 @@
 # Agritech Answers — prédiction de rendement et recommandation de culture
 
+[![CI/CD](https://github.com/FaizaKh93/Projet12_mission/actions/workflows/ci_cd.yml/badge.svg)](https://github.com/FaizaKh93/Projet12_mission/actions/workflows/ci_cd.yml)
+
 Prototype MLOps : une API de prédiction du rendement agricole et de recommandation
 de culture, interrogée par une interface Streamlit.
 
@@ -9,15 +11,26 @@ de culture, interrogée par une interface Streamlit.
 src/agritech/config.py          chemins, graines, vocabulaire, hypothèses (valeurs seules)
 src/agritech/training.py        prétraitement, modèles, optimisation Optuna, runs MLflow
 src/agritech/evaluation.py      métriques de prédiction, économiques et de recommandation
+src/agritech/preprocessing.py   reconstruction des 13 variables à partir des 8 saisies
+api/                            service FastAPI, schémas Pydantic, journal des appels
+app/app.py                      interface Streamlit, qui interroge l'API en HTTP
+Dockerfile                      image de service : ni MLflow, ni données, ni uv
 scripts/train.py                point d'entrée de l'entraînement
+scripts/smoke_docker.py         épreuve d'un conteneur réel (bibliothèque standard seule)
+tests/                          suite pytest : API, interface, parité du prétraitement
+.github/workflows/ci_cd.yml     chaîne d'intégration et de livraison continues
 models/                         modèles optimisés en .joblib (un seul versionné)
 data/OC_InputData/              jeux de données sources (non versionnés)
 data/interim/                   artefacts intermédiaires reconstructibles
 data/processed/                 dataset consolidé (CSV livrable + Parquet de travail)
 data/processed/splits/          train / val / test et leurs métadonnées
 notebooks/                      exploration, préparation, découpage, expérimentation
-reports/                        résumés des choix et figures
+reports/                        rapports destinés aux agriculteurs, et leurs figures
 ```
+
+Deux publics, deux endroits : `reports/` s'adresse aux **agriculteurs** —
+tableaux, figures, aucun jargon. Tout ce qui relève du **développement**,
+chaîne CI/CD comprise, se documente dans ce README.
 
 Le contenu de `data/` n'est pas versionné : il se reconstruit en exécutant les
 notebooks dans l'ordre `exploratory_data_analysis` → `data_preparation` → `data_split`.
@@ -36,6 +49,113 @@ Ouvrir ensuite les notebooks dans VS Code en sélectionnant le noyau
 `.venv\Scripts\python.exe`, ou lancer `uv run jupyter lab` pour travailler
 dans le navigateur. Préfixer une commande par `uv run` l'exécute dans
 l'environnement du projet sans avoir à l'activer.
+
+## Intégration et livraison continues
+
+[`.github/workflows/ci_cd.yml`](.github/workflows/ci_cd.yml) — une chaîne, deux
+jobs, déclenchée sur **toute poussée** quelle que soit la branche, et à
+l'**ouverture** d'une proposition de fusion.
+
+```
+CI · Contrôles  ──→  CI · Image et conteneur → CD · Publication
+```
+
+### Ce que chaque job prouve
+
+**`CI · Contrôles`** installe l'environnement figé par `uv.lock`, lance la suite
+de tests **sous Linux** — alors que le développement se fait sous Windows —
+avec un plancher de couverture à 90 %, puis vérifie que les deux
+`requirements.txt` livrés décrivent encore le lock. Ces fichiers sont exigés par
+le cahier des charges, mais ils sont **dérivés** : `uv.lock` reste la seule
+source de vérité, et toute divergence fait échouer la chaîne.
+
+**`CI · Image et conteneur → CD · Publication`** construit l'image, la charge
+dans le démon du runner et l'éprouve avec `scripts/smoke_docker.py` : un
+conteneur réel démarre, ses routes sont interrogées en HTTP, l'absence de MLflow
+et de PyArrow est vérifiée, et un artefact falsifié doit **empêcher** le
+démarrage.
+
+La livraison ne s'exécute qu'après une poussée sur `main` :
+
+```yaml
+if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+```
+
+Une proposition de fusion construit donc son image et l'éprouve, mais ne touche
+ni aux identifiants ni au registre. L'image publiée n'est **jamais
+reconstruite** : `docker tag` renomme celle qui vient de passer les tests, de
+sorte que les octets publiés sont exactement les octets éprouvés. Deux
+étiquettes partent : `latest`, qui suit la branche, et le SHA du commit, qui
+rattache chaque image à son code.
+
+### Ce qui n'est pas vérifié en intégration continue
+
+Dix tests sont ignorés sur un runner. Le résumé de chaque exécution les nomme,
+avec leur motif.
+
+| Tests | Pourquoi |
+|---|---|
+| 8 tests de parité (`test_preprocessing.py`) | ils comparent la reconstruction aux colonnes que le dataset porte lui-même ; `data/` n'est pas versionné |
+| 1 contrôle des bornes du domaine (`test_api.py`) | il confronte `config.py` aux minima et maxima réellement observés dans `train` |
+| 1 parité avec le registre (`test_api.py`) | `mlflow.db` n'existe pas sur un runner |
+
+Ce ne sont **pas** des tests désactivés. Ils s'exécutent intégralement sur un
+poste qui possède les données, et c'est là qu'ils doivent passer avant toute
+fusion. Fabriquer un jeu de données pour les faire tourner en CI les rendrait
+tautologiques : inventer la référence, puis vérifier qu'on la retrouve.
+
+Tout le reste du module de prétraitement s'éprouve bien en CI, sur l'**artefact
+déployé** — `models/modele_api.joblib` embarque la table FAO ajustée à
+l'entraînement, donc les règles de dérivation se vérifient sans aucune donnée,
+et sur la pièce effectivement livrée.
+
+### Reproduire les contrôles localement
+
+```bash
+# ce que lance la CI, à l'identique
+uv run pytest -q -rfEs --cov --cov-report=term-missing --cov-fail-under=90
+
+# régénérer les requirements après un changement de dépendance
+uv export --no-default-groups --group api --no-emit-project --no-hashes --format requirements.txt -o requirements.txt
+uv export --no-default-groups --group ui  --no-emit-project --no-hashes --format requirements.txt -o app/requirements.txt
+
+# l'image et son épreuve
+docker build -t agritech-api:ci .
+uv run python scripts/smoke_docker.py --image agritech-api:ci
+```
+
+### Ce que le dépôt doit fournir
+
+| Nom | Où | Valeur |
+|---|---|---|
+| `DOCKERHUB_USERNAME` | Settings → Secrets and variables → Actions → **Variables** | le nom de compte Docker Hub |
+| `DOCKERHUB_TOKEN` | idem → **Secrets** | un jeton dédié à la CI, niveau **Repo Read & Write** |
+
+Un jeton Docker Hub personnel **ne peut pas être restreint à un seul dépôt** :
+sa permission vaut pour tout le compte. D'où l'intérêt d'un jeton dédié,
+révocable sans toucher à l'usage quotidien, et du niveau minimal — jamais
+*Repo Read, Write, Delete*.
+
+### Versions des actions
+
+Toutes les actions sont épinglées sur un **SHA de commit**, leur numéro de
+version en commentaire. Une étiquette, même `@v7`, peut être déplacée par son
+mainteneur ; un SHA, non. Cela compte surtout pour `docker/login-action`, le
+seul pas qui manipule le jeton.
+
+[`.github/dependabot.yml`](.github/dependabot.yml) les fait vieillir sous
+surveillance, chaque semaine, pour le **seul** écosystème `github-actions`. Y
+déclarer Python ouvrirait des propositions qui modifient `uv.lock` sans toucher
+aux `requirements.txt` exportés : chacune échouerait sur le contrôle de dérive.
+Les mises à jour de *sécurité* Python, elles, arrivent sans configuration.
+
+### État de la chaîne au 29 octobre 2026
+
+L'intégration continue est **éprouvée en conditions réelles** : tests, couverture,
+dépendances, construction de l'image et épreuve du conteneur ont tous tourné sur
+un runner. La livraison continue est **configurée mais pas encore exécutée** —
+les pas de publication se sont correctement abstenus sur les branches de
+travail, mais aucune image n'a encore été poussée sur Docker Hub.
 
 ## Suivi des expériences
 
