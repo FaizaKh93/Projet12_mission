@@ -1,0 +1,31 @@
+# Suivi des versions des actions GitHub.
+#
+# **Uniquement `github-actions`, et c'est délibéré.** Déclarer ici l'écosystème
+# Python ouvrirait des propositions de fusion qui modifieraient `uv.lock` sans
+# toucher aux deux `requirements.txt` exportés : chacune échouerait sur le
+# contrôle de dérive de la CI, et la chaîne paraîtrait cassée en permanence.
+#
+# Les mises à jour de *sécurité* Python, elles, continuent d'arriver sans
+# aucune configuration : c'est ainsi qu'est née la proposition sur `tornado`,
+# ouverte alors que ce fichier n'existait pas encore.
+#
+# Les actions du workflow sont épinglées sur des SHA de commit. Un SHA ne bouge
+# pas — mais il vieillit, et rien ne le signalait : c'est ce qui nous a fait
+# partir avec un `setup-uv@v10` qui n'existe pas. Dependabot comble ce trou.
+#
+# Aucune fusion automatique : chaque proposition passe la chaîne complète, puis
+# une relecture.
+
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    # `/` et non `.github/workflows` : Dependabot part de la racine du dépôt et
+    # y cherche lui-même les workflows.
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      # Conventional Commits, comme le reste du projet. Dependabot ajoute
+      # lui-même le deux-points après ce préfixe.
+      prefix: "ci"
