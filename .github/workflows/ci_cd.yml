@@ -1,0 +1,278 @@
+# Chaîne d'intégration (CI) et de livraison (CD) d'Agritech Answers.
+#
+#   CI — ce qui vérifie      tests · dérive des dépendances · image et conteneur
+#   CD — ce qui livre        publication de l'image sur Docker Hub
+#
+# La CI tourne partout. La CD ne tourne que sur `main`, jamais depuis une
+# proposition de fusion. Aucun modèle n'est entraîné ni promu ici : la chaîne
+# MLOps est un travail distinct, déclenché à la main.
+#
+#   Secrets     DOCKERHUB_TOKEN      (Settings → Secrets)
+#   Variables   DOCKERHUB_USERNAME   (Settings → Variables)
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Une nouvelle poussée annule l'exécution précédente, sauf sur `main` où une
+# publication ne doit pas être interrompue.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # `shell: bash` explicite lance `bash -eo pipefail`, là où le défaut se
+    # contente de `-e`. Sans `pipefail`, un `pytest … | tee` en échec
+    # laisserait le job au vert.
+    shell: bash
+
+env:
+  # Les versions du Dockerfile : un artefact scikit-learn se recharge sous
+  # l'environnement qui l'a produit.
+  VERSION_PYTHON: "3.12.13"
+  VERSION_UV: "0.11.29"
+
+jobs:
+  # ========================================================================= #
+  #  C I  —  I N T É G R A T I O N   C O N T I N U E
+  #
+  #  Trois contrôles, déclenchés à chaque poussée et à chaque proposition de
+  #  fusion. Le troisième se prolonge en CD sur `main` : voir sa bannière.
+  # ========================================================================= #
+
+  # --- CI 1/3 : la suite de tests, sur Linux alors qu'on développe sous
+  #              Windows. C'est la première chose que cette chaîne prouve.
+  tests:
+    name: CI · Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Installer uv
+        uses: astral-sh/setup-uv@v10
+        with:
+          version: ${{ env.VERSION_UV }}
+          python-version: ${{ env.VERSION_PYTHON }}
+          enable-cache: true
+
+      # `--locked` échoue si `uv.lock` ne décrit plus `pyproject.toml`.
+      # `notebooks` est écarté : aucun test n'importe JupyterLab.
+      - name: Installer les dépendances
+        run: uv sync --locked --no-default-groups
+                     --group api --group dev --group ui
+
+      # `--no-sync` est indispensable : sans lui, `uv run` resynchronise avec
+      # les groupes par défaut et annule la sélection ci-dessus.
+      - name: Lancer les tests
+        run: |
+          uv run --no-sync pytest -q -rs \
+            --cov --cov-report=term-missing --cov-fail-under=90 \
+            | tee resultat-pytest.txt
+
+      # Écrire le compte rendu lisible dans l'onglet Actions.
+      #
+      # `$GITHUB_STEP_SUMMARY` est un fichier que GitHub crée pour chaque job
+      # et affiche **en Markdown** sur la page du job. Tout ce qu'on y écrit
+      # apparaît là, sans avoir à ouvrir les journaux bruts. C'est ce qui
+      # répond au critère « des logs ou notifications sont prévus ».
+      #
+      # `echo` écrit une ligne. Les accolades regroupent toutes les lignes
+      # pour n'ouvrir le fichier qu'une fois : `>>` ajoute à la fin, `>`
+      # écraserait ce qu'un autre pas y a déjà mis.
+      #
+      # `if: always()` : le résumé est écrit même quand les tests échouent —
+      # c'est précisément là qu'il sert.
+      - name: Résumer l'exécution
+        if: always()
+        run: |
+          {
+            echo "## CI · Tests"
+            echo
+            # Le fichier n'existe pas si l'installation a échoué avant pytest.
+            # Sans ce cas, `tail` échouerait et masquerait l'erreur d'origine.
+            if [ ! -f resultat-pytest.txt ]; then
+              echo "Aucun résultat : l'exécution s'est arrêtée avant pytest."
+              echo "Voir le pas « Installer les dépendances »."
+            else
+              echo '```'
+              tail -n 25 resultat-pytest.txt    # les 25 dernières lignes
+              echo '```'
+              # Les tests ignorés sont nommés. Un seul l'est : celui qui
+              # compare l'artefact au registre MLflow, absent d'un runner.
+              if grep -q "SKIPPED" resultat-pytest.txt; then
+                echo
+                echo "### Tests ignorés"
+                echo
+                grep "SKIPPED" resultat-pytest.txt | sed 's/^/- /'
+                echo
+                echo "Un test ignoré n'est pas un test réussi."
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # --- CI 2/3 : les deux `requirements.txt` sont des livrables exigés, mais
+  #              `uv.lock` reste la seule source de vérité.
+  requirements:
+    name: CI · Dépendances livrées
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Installer uv
+        uses: astral-sh/setup-uv@v10
+        with:
+          version: ${{ env.VERSION_UV }}
+          python-version: ${{ env.VERSION_PYTHON }}
+
+      # `--locked` est vital : sans lui, `uv export` régénère un lock périmé
+      # et compare contre lui — le contrôle masquerait la dérive qu'il
+      # cherche. La comparaison ignore les commentaires : `uv export` y écrit
+      # le chemin de sortie, différent entre les deux fichiers.
+      - name: Vérifier l'absence de dérive
+        run: |
+          derive=0
+          verifier() {
+            uv export --locked --no-default-groups --group "$1" \
+              --no-emit-project --no-hashes --format requirements.txt \
+              -o "/tmp/attendu-$1.txt"
+            if diff <(grep -v '^#' "/tmp/attendu-$1.txt") \
+                    <(grep -v '^#' "$2") > "/tmp/diff-$1.txt"; then
+              echo "OK      $2"
+            else
+              echo "DÉRIVE  $2"
+              cat "/tmp/diff-$1.txt"
+              derive=1
+            fi
+          }
+          verifier api requirements.txt
+          verifier ui app/requirements.txt
+          exit $derive
+
+      # Texte entièrement fixe : `cat <<'FIN'` recopie tout jusqu'à la ligne
+      # `FIN` telle quelle. Le délimiteur entre guillemets interdit toute
+      # substitution, donc les accents graves restent des accents graves.
+      # On lit ici exactement ce qui s'affichera.
+      - name: Expliquer la dérive
+        if: failure()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'FIN'
+          ## CI · Dépendances livrées
+
+          Un `requirements.txt` ne correspond plus à `uv.lock`.
+          Il ne s'édite pas à la main, il se régénère :
+
+          ```bash
+          uv export --no-default-groups --group api --no-emit-project --no-hashes --format requirements.txt -o requirements.txt
+          uv export --no-default-groups --group ui  --no-emit-project --no-hashes --format requirements.txt -o app/requirements.txt
+          ```
+          FIN
+
+  # --- CI 3/3, prolongé en CD : l'image est construite une seule fois,
+  #     éprouvée, puis publiée. Deux jobs séparés auraient imposé une seconde
+  #     construction, dont rien ne garantirait formellement l'identité.
+  image:
+    name: CI · Image et conteneur → CD · Publication
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [tests, requirements]
+
+    env:
+      LOCALE: agritech-api:ci
+      DEPOT: ${{ vars.DOCKERHUB_USERNAME }}/agritech-api
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      # ----- CI : construire et éprouver -------------------------------- #
+
+      # `load` et non `push` : l'image reste dans le démon du runner.
+      - name: CI — Construire l'image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: ${{ env.LOCALE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Aucun `uv sync` : le script n'utilise que la bibliothèque standard.
+      # Il démarre un conteneur réel, interroge les routes, vérifie l'absence
+      # de MLflow et de PyArrow, et qu'un artefact falsifié bloque le démarrage.
+      - name: CI — Éprouver le conteneur
+        run: python3 scripts/smoke_docker.py --image "$LOCALE"
+
+      - name: CI — Signaler l'échec
+        if: failure()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'FIN'
+          ## CI · Image et conteneur
+
+          Reproduire en local :
+
+          ```bash
+          docker build -t agritech-api:ci .
+          uv run python scripts/smoke_docker.py --image agritech-api:ci
+          ```
+          FIN
+
+      # ===================================================================== #
+      #  C D  —  L I V R A I S O N   C O N T I N U E
+      #
+      #  Les trois pas suivants ne s'exécutent que sur une poussée vers
+      #  `main`. Une proposition de fusion construit et éprouve son image,
+      #  mais ne touche ni aux identifiants ni au registre.
+      #
+      #  Aucune reconstruction : `docker tag` renomme l'image déjà éprouvée,
+      #  donc les octets publiés sont ceux qui ont passé les tests.
+      # ===================================================================== #
+
+      - name: CD — S'authentifier auprès de Docker Hub
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # `latest` suit la branche ; le SHA rattache chaque image à son commit.
+      - name: CD — Publier l'image éprouvée
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          docker tag "$LOCALE" "$DEPOT:latest"
+          docker tag "$LOCALE" "$DEPOT:${{ github.sha }}"
+          docker push "$DEPOT:latest"
+          docker push "$DEPOT:${{ github.sha }}"
+
+      # `always() &&` : sans lui, un pas conditionnel est implicitement
+      # `success() && …` et ne s'exécuterait pas après un échec — c'est-à-dire
+      # jamais quand le récapitulatif sert le plus.
+      - name: CD — Récapituler
+        if: always() && github.ref == 'refs/heads/main'
+            && github.event_name == 'push'
+        run: |
+          {
+            echo "## CD · Publication"
+            echo
+            if [ "${{ job.status }}" = "success" ]; then
+              echo "Image éprouvée puis publiée, sans reconstruction :"
+              echo
+              echo "- \`$DEPOT:latest\`"
+              echo "- \`$DEPOT:${{ github.sha }}\`"
+            else
+              echo "Échec. Vérifier la variable \`DOCKERHUB_USERNAME\` et le"
+              echo "secret \`DOCKERHUB_TOKEN\` dans les réglages du dépôt."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
