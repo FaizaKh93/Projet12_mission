@@ -72,6 +72,18 @@ dev = [
     {include-group = "train"},
 ]
 
+# Interface utilisateur. Volontairement **disjointe du groupe `api`** : le
+# front n'interroge le service qu'en HTTP, il n'importe ni FastAPI ni le
+# modele. Les deux pourront donc etre deployes separement.
+ui = [
+    "streamlit>=1.40",
+    "requests>=2.32",
+    # Streamlit l'installe deja, mais `app.py` l'importe : une dependance
+    # utilisee directement se declare, sinon elle disparait le jour ou
+    # Streamlit change de moteur graphique.
+    "altair>=5.5",
+]
+
 [build-system]
 requires = ["uv_build>=0.11.29,<0.12.0"]
 build-backend = "uv_build"
@@ -80,7 +92,7 @@ build-backend = "uv_build"
 # `uv sync` sans option installe donc l'environnement de travail complet, API
 # comprise. L'image Docker, elle, n'installe aucun de ces groupes :
 #   uv export --no-default-groups --group api --no-emit-project --no-hashes
-default-groups = ["api", "dev", "notebooks"]
+default-groups = ["api", "dev", "notebooks", "ui"]
 
 [tool.uv.build-backend]
 # Le paquet s'appelle `agritech`, pas `agritech_answers` deduit du nom du projet
@@ -109,7 +121,7 @@ pythonpath = ["."]
 # --------------------------------------------------------------------------- #
 
 [tool.coverage.run]
-source = ["api", "agritech"]
+source = ["api", "agritech", "app"]
 branch = true
 omit = [
     "*/agritech/training.py",

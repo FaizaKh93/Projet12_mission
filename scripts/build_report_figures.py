@@ -336,53 +336,54 @@ def figure_rendement_vs_marge(modele) -> None:
 
     figure, (gauche, droite) = plt.subplots(1, 2, figsize=(13.5, 5.0))
 
-    # --- Panneau gauche : six rendements indiscernables ------------------- #
-    ordre = sorted(predits, key=predits.get, reverse=True)
-    gauche.barh([EN_FRANCAIS[c] for c in ordre], [predits[c] for c in ordre],
-                color=BLUE, alpha=0.85, height=0.58)
+    # --- Les deux panneaux partagent le même ordre, alphabétique ---------- #
+    # Trier chaque panneau par sa propre grandeur empêchait la lecture
+    # horizontale : le maïs était cinquième à gauche et premier à droite. Un
+    # ordre figé rend la comparaison immédiate ; le classement, lui, reste
+    # dans le texte et dans la réponse de l'API.
+    positions = list(range(len(CULTURES)))
+
+    gauche.barh(positions, [predits[c] for c in CULTURES], color=BLUE,
+                alpha=0.85, height=0.58)
     gauche.set_xlim(0, max(predits.values()) * 1.30)
-    gauche.set_ylim(len(CULTURES) - 0.45, -0.55)
     gauche.set_xlabel("rendement attendu (t/ha)", fontsize=10, color=GRIS)
     gauche.set_title("Le modèle ne départage pas les cultures", fontsize=12.5,
                      fontweight="bold", color="#1a202c", loc="left", pad=12)
-    for index, culture in enumerate(ordre):
+    for index, culture in enumerate(CULTURES):
         gauche.text(predits[culture] + 0.1, index, fr(predits[culture], 2),
                     va="center", fontsize=9.5, color=GRIS)
 
-    # --- Panneau droit : mêmes emplacements, mêmes barres ----------------- #
-    classees = sorted(marges, key=marges.get, reverse=True)
-    etiquettes = ([EN_FRANCAIS[c] for c in classees]
-                  + [EN_FRANCAIS[c] for c in CULTURES if c not in marges])
-    droite.barh([EN_FRANCAIS[c] for c in classees],
-                [marges[c] for c in classees],
-                color=ORANGE, alpha=0.9, height=0.58)
-    droite.set_xlim(0, max(marges.values()) * 1.32)
-    droite.set_ylim(len(CULTURES) - 0.45, -0.55)
-    droite.set_yticks(range(len(etiquettes)))
-    droite.set_yticklabels(
-        etiquettes,
-        # Les cultures sans budget restent nommées, en gris : les effacer
-        # laisserait croire que la comparaison porte sur deux cultures seules.
-        color=GRIS)
-    for etiquette in droite.get_yticklabels()[len(classees):]:
-        etiquette.set_color(GRIS_CLAIR)
+    # --- Panneau droit : mêmes emplacements, barres seulement si budget --- #
+    budgetees = [c for c in CULTURES if c in marges]
+    maxi = max(marges.values())
+    droite.barh([CULTURES.index(c) for c in budgetees],
+                [marges[c] for c in budgetees], color=ORANGE, alpha=0.9,
+                height=0.58)
+    droite.set_xlim(0, maxi * 1.32)
     droite.set_xlabel("marge brute simulée (€/ha)", fontsize=10, color=GRIS)
     droite.set_title("Ce sont vos chiffres économiques qui tranchent",
                      fontsize=12.5, fontweight="bold", color="#1a202c",
                      loc="left", pad=12)
-    for index, culture in enumerate(classees):
-        droite.text(marges[culture] + max(marges.values()) * 0.015, index,
+    for culture in budgetees:
+        droite.text(marges[culture] + maxi * 0.015, CULTURES.index(culture),
                     f"{fr(marges[culture])} €", va="center", fontsize=9.5,
                     color=GRIS)
 
-    # L'espace vide porte son explication, là où le lecteur le remarque.
-    droite.text(max(marges.values()) * 0.04, len(classees) + 0.75,
-                "Aucun budget fourni pour ces quatre cultures :\n"
-                "elles ne sont pas comparées. Rien ne dit\n"
-                "qu'elles feraient moins bien.",
-                fontsize=9.5, color=GRIS, va="top",
-                bbox={"boxstyle": "round,pad=0.6", "facecolor": "#fffaf0",
-                      "edgecolor": ORANGE, "linewidth": 0.9})
+    # Une case laissée vide se lirait comme une marge nulle. Elle porte donc
+    # son motif, à sa propre hauteur.
+    for culture in CULTURES:
+        if culture not in marges:
+            droite.text(maxi * 0.02, CULTURES.index(culture),
+                        "budget non fourni", va="center", fontsize=9.5,
+                        color=GRIS_CLAIR, style="italic")
+
+    for ax in (gauche, droite):
+        ax.set_yticks(positions)
+        ax.set_yticklabels([EN_FRANCAIS[c] for c in CULTURES], color=GRIS)
+        ax.set_ylim(len(CULTURES) - 0.45, -0.55)
+    for index, culture in enumerate(CULTURES):
+        if culture not in marges:
+            droite.get_yticklabels()[index].set_color(GRIS_CLAIR)
 
     for ax in (gauche, droite):
         depouiller(ax)
@@ -473,15 +474,114 @@ def figure_prix() -> None:
     enregistrer(figure, "prix_reference_faostat.png")
 
 
+# --------------------------------------------------------------------------- #
+# Figure 5 — l'architecture de l'étape 4
+# --------------------------------------------------------------------------- #
+
+
+def figure_architecture() -> None:
+    """Qui fait quoi, de l'agriculteur au modèle.
+
+    Deux choses que le schéma doit faire passer, et qui se perdent en prose :
+
+    **La frontière HTTP.** L'interface ne contient aucune logique de modèle.
+    Elle pose des questions et affiche des réponses ; tout le reste est
+    derrière une adresse. C'est ce qui permet de déployer les deux séparément.
+
+    **MLflow n'est pas dans la chaîne de production.** Il a servi à choisir et
+    à tracer le modèle, et le conteneur ne l'embarque pas. Le représenter dans
+    le flux laisserait croire à une dépendance d'exécution ; il est donc posé
+    à l'écart, relié par un trait discontinu qui ne porte pas de requête.
+    """
+    figure, ax = plt.subplots(figsize=(13.5, 6.4))
+    figure.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis("off")
+    ax.grid(False)
+
+    # Les trois blocs sont alignés **par le haut**, pas centrés : centrés,
+    # celui de six lignes débordait sur la rangée du dessous.
+    sommet = 0.955
+    colonnes = (
+        ("agriculteur", 0.015, 0.195, "L'agriculteur", [
+            "Décrit sa parcelle",
+            "Saisit ses charges",
+            "Lit les résultats",
+            "Emporte le CSV"], GRIS, "#ffffff"),
+        ("streamlit", 0.245, 0.265, "Streamlit — app/app.py", [
+            "Formulaire, graphiques, export",
+            "Bornes et cultures lues dans l'API",
+            "",
+            "Aucune logique de modèle :",
+            "rien n'est calculé ici"], BLUE, "#f7fafc"),
+        ("fastapi", 0.645, 0.340, "FastAPI — service de prédiction", [
+            "/predict · un rendement et sa fourchette",
+            "/recommend · les six cultures, les marges",
+            "/model/info · le contrat et la provenance",
+            "/reference/prices · les prix FAOSTAT",
+            "",
+            "/health · /logs — supervision"], ORANGE, "#fffaf0"),
+    )
+    bas = {}
+    for cle, x, largeur, titre, lignes, couleur, fond in colonnes:
+        haut = hauteur(lignes)
+        _boite(ax, x, sommet - haut, largeur, titre, lignes, couleur, fond)
+        bas[cle] = sommet - haut
+
+    # --- Ce que l'API a derrière elle ------------------------------------- #
+    for x, titre, lignes in (
+        (0.645, "Modèle Ridge", ["Artefact .joblib versionné",
+                                 "embarqué dans l'image"]),
+        (0.830, "Référentiel FAOSTAT", ["Prix 2024, médiane mondiale",
+                                        "re-dérivable par script"]),
+    ):
+        _boite(ax, x, 0.105, 0.155, titre, lignes, GREEN, "#f0fff4")
+
+    _fleche = lambda d, a: ax.add_patch(FancyArrowPatch(  # noqa: E731
+        d, a, arrowstyle="-|>", mutation_scale=15, linewidth=1.4,
+        color=GRIS_CLAIR, zorder=1))
+    milieu = (sommet + bas["streamlit"]) / 2
+    _fleche((0.212, milieu), (0.241, milieu))
+    _fleche((0.514, milieu + 0.055), (0.641, milieu + 0.055))
+    _fleche((0.641, milieu - 0.055), (0.514, milieu - 0.055))
+    ax.text(0.578, milieu + 0.082, "requête HTTP", ha="center", fontsize=8.8,
+            color=GRIS, style="italic")
+    ax.text(0.578, milieu - 0.105, "réponse JSON", ha="center", fontsize=8.8,
+            color=GRIS, style="italic")
+    _fleche((0.722, bas["fastapi"]), (0.722, 0.365))
+    _fleche((0.907, bas["fastapi"]), (0.907, 0.365))
+
+    # --- MLflow, hors chaîne ---------------------------------------------- #
+    lignes_mlflow = ["A servi à choisir le modèle, à suivre les essais et à",
+                     "le promouvoir — puis à l'exporter en artefact.",
+                     "Le conteneur de production ne l'embarque pas : le trait",
+                     "en pointillé ne porte aucune requête."]
+    _boite(ax, 0.015, 0.105, 0.495, "MLflow — traçabilité, hors production",
+           lignes_mlflow, GRIS_CLAIR, "#f7fafc")
+    ax.add_patch(FancyArrowPatch(
+        (0.512, 0.232), (0.641, 0.232), arrowstyle="-", linewidth=1.3,
+        linestyle=(0, (5, 4)), color=GRIS_CLAIR, zorder=1))
+
+    figure.text(0.015, 0.055,
+                "La seule chose qui traverse la frontière du milieu est du "
+                "texte : une question en HTTP, une réponse en JSON. "
+                "L'interface ne sait pas ce qu'est un modèle, et le service "
+                "ne sait pas qu'une interface existe.",
+                fontsize=9, color=GRIS, style="italic", va="top")
+
+    enregistrer(figure, "app_architecture.png")
+
+
 def main() -> int:
-    """Charge le modèle une fois, puis trace les quatre figures."""
+    """Charge le modèle une fois, puis trace les cinq figures."""
     sns.set_theme(style="whitegrid", palette="deep")
     plt.rcParams["figure.dpi"] = 110
 
     if not DOSSIER.exists():
         raise SystemExit(f"Dossier de figures introuvable : {DOSSIER}")
 
-    print("=== Figures du rapport de l'étape 3 ===")
+    print("=== Figures des rapports des étapes 3 et 4 ===")
     modele = charger_modele()
     print(f"  modèle : {modele.served.registry} v{modele.served.version} "
           f"({modele.served.source})")
@@ -490,6 +590,7 @@ def main() -> int:
     figure_intervalle(modele)
     figure_rendement_vs_marge(modele)
     figure_prix()
+    figure_architecture()
     return 0
 
 
