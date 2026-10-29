@@ -92,7 +92,7 @@ jobs:
       # les groupes par défaut et annule la sélection ci-dessus.
       - name: Lancer les tests
         run: |
-          uv run --no-sync pytest -q -rs \
+          uv run --no-sync pytest -q -rfEs \
             --cov --cov-report=term-missing --cov-fail-under=90 \
             | tee resultat-pytest.txt
 
@@ -179,8 +179,18 @@ jobs:
               echo '```'
               tail -n 25 resultat-pytest.txt    # les 25 dernières lignes
               echo '```'
-              # Les tests ignorés sont nommés. Un seul l'est : celui qui
-              # compare l'artefact au registre MLflow, absent d'un runner.
+              # `-rfEs` fait écrire à pytest un résumé court nommant les
+              # tests en échec, en erreur et ignorés. On remonte les deux
+              # premières catégories ici : sans elles, un échec reste anonyme
+              # et il faut ouvrir les journaux bruts pour savoir lequel.
+              if grep -qE "^(FAILED|ERROR) " resultat-pytest.txt; then
+                echo
+                echo "### Tests en échec ou en erreur"
+                echo
+                grep -E "^(FAILED|ERROR) " resultat-pytest.txt | sed 's/^/- /'
+              fi
+              # Les tests ignorés sont nommés eux aussi : ceux qui exigent le
+              # registre MLflow ou les partitions, absents d'un runner.
               if grep -q "SKIPPED" resultat-pytest.txt; then
                 echo
                 echo "### Tests ignorés"
