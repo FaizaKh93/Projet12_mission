@@ -12,9 +12,15 @@ src/agritech/config.py          chemins, graines, vocabulaire, hypothèses (vale
 src/agritech/training.py        prétraitement, modèles, optimisation Optuna, runs MLflow
 src/agritech/evaluation.py      métriques de prédiction, économiques et de recommandation
 src/agritech/preprocessing.py   reconstruction des 13 variables à partir des 8 saisies
+src/agritech/preparation.py     construction du dataset consolidé, en fonctions pures
+src/agritech/decoupage.py       découpage train/val/test et ses garde-fous
+src/agritech/pipeline.py        orchestration des quatre étapes et leurs empreintes
 api/                            service FastAPI, schémas Pydantic, journal des appels
 app/app.py                      interface Streamlit, qui interroge l'API en HTTP
 Dockerfile                      image de service : ni MLflow, ni données, ni uv
+scripts/prepare_data.py         point d'entrée — préparation
+scripts/split_data.py           point d'entrée — découpage
+scripts/run_pipeline.py         point d'entrée — la chaîne entière
 scripts/train.py                point d'entrée de l'entraînement
 scripts/smoke_docker.py         épreuve d'un conteneur réel (bibliothèque standard seule)
 tests/                          suite pytest : API, interface, parité du prétraitement
@@ -49,6 +55,100 @@ Ouvrir ensuite les notebooks dans VS Code en sélectionnant le noyau
 `.venv\Scripts\python.exe`, ou lancer `uv run jupyter lab` pour travailler
 dans le navigateur. Préfixer une commande par `uv run` l'exécute dans
 l'environnement du projet sans avoir à l'activer.
+
+## Chaîne MLOps
+
+```
+préparation  →  découpage  →  entraînement  →  export
+   data/          splits/       mlflow.db      models/modele_api.joblib
+```
+
+```bash
+uv run python scripts/run_pipeline.py                      # préparation + découpage
+uv run python scripts/run_pipeline.py --jusqua export      # tout, entraînement compris
+```
+
+### Où vit le code, et pourquoi
+
+La transformation des données était écrite dans les notebooks. Un notebook ne se
+rejoue pas : il s'ouvre, se fait dérouler cellule après cellule, et rien ne
+garantit l'ordre ni l'état des variables. Le livrable n'était donc reproductible
+que par un humain attentif.
+
+La logique vit maintenant dans trois modules de `src/agritech/`, en fonctions
+**pures** — elles prennent des tables, en rendent d'autres, n'écrivent rien et
+n'affichent rien. Les notebooks les appellent pour commenter leurs sorties ; les
+scripts les appellent pour produire le livrable. Les deux chemins traversent le
+même code, donc ne peuvent pas diverger.
+
+Les notebooks gardent tout le reste : contrôles qualité, validation hors
+échantillon, analyses de redondance, figures. C'est leur rôle — expliquer et
+justifier, pas exécuter.
+
+**Un seul producteur.** Les notebooks n'écrivent **aucun jeu de données** — ni
+CSV, ni Parquet, ni artefact intermédiaire, pas même temporaire. Ils calculent
+en mémoire, commentent, puis confrontent leur résultat aux fichiers que les
+scripts ont produits. Aucune ambiguïté n'est donc possible sur le fichier qui
+fait foi, et un « Run All » ne peut pas réécrire `data/` par surprise. Les
+seules écritures d'un notebook vont dans `reports/figures/` : ce sont les
+figures du rapport métier, pas des données.
+
+### Les deux empreintes
+
+| | Porte sur | Répond à |
+|---|---|---|
+| `data_version` | le contenu du dataset consolidé | de quel **dataset** ce run provient-il ? |
+| `split_version` | les octets des trois partitions | de quels **fichiers** l'entraînement a-t-il lu ? |
+
+Chaque run MLflow et la provenance de l'artefact déployé les portent toutes les
+deux. Deux runs d'empreintes différentes ne sont pas comparables — et c'est ce
+que la chaîne vérifie avant d'agir.
+
+### Ce que la chaîne refuse de faire
+
+**Écraser un dataset différent.** `prepare_data.py` régénère puis compare avant
+d'écrire. Si le contenu diffère de celui du disque, il s'arrête : réécrire
+changerait `data_version` et périmerait tous les runs existants.
+
+**Réécrire des partitions.** Elles sont produites une fois, puis relues par
+chaque entraînement. Le script refuse dans trois cas — lot incomplet, vestige
+d'une exécution interrompue dont les fichiers peuvent provenir de découpages
+différents ; partitions périmées, générées pour un autre dataset ; et lot
+complet déjà à jour, où il vérifie sans toucher.
+
+**Entraîner sans qu'on le lui demande.** Une demi-heure de calcul et des
+écritures dans le registre ne doivent pas être la conséquence d'une commande
+tapée distraitement. Par défaut la chaîne s'arrête au découpage.
+
+`--forcer` lève ces refus, un par un, pour les régénérations voulues.
+
+### Vérifier sans rien écrire
+
+```bash
+uv run python scripts/prepare_data.py --verifier
+```
+
+Régénère le dataset dans un dossier temporaire et le compare à celui du disque,
+sur deux plans distincts : le **contenu** — colonnes, types, valeurs — et les
+**octets**. Les deux peuvent diverger : une autre version de pyarrow sérialise
+le même tableau différemment, auquel cas les données sont identiques mais
+`data_version` change. Il vaut mieux le savoir avant d'écraser quoi que ce soit.
+
+C'est ce contrôle qui a autorisé l'extraction : la chaîne extraite reproduit le
+dataset livré à l'octet près, `data_version c9547cbd218b`, celui-là même que
+cite la provenance de l'artefact servi par l'API.
+
+### Ce qui est éprouvé en intégration continue
+
+`tests/test_pipeline.py` fait tourner la chaîne sur six tables minuscules
+construites dans le test : rendement négatif retiré, cible manquante conservée,
+pluie illisible transformée en absence, cardinalité validée avant jointure,
+`NaN` préservés pour les cultures sans référence FAO, ordre des colonnes du
+livrable, et les refus du découpage. Aucune donnée n'est nécessaire.
+
+Ce que la CI ne peut pas porter, c'est « le pipeline reproduit le dataset
+livré » — il demande le million de lignes. C'est `--verifier` qui s'en charge,
+sur un poste qui a les données.
 
 ## Intégration et livraison continues
 
@@ -151,11 +251,15 @@ Les mises à jour de *sécurité* Python, elles, arrivent sans configuration.
 
 ### État de la chaîne au 29 octobre 2026
 
-L'intégration continue est **éprouvée en conditions réelles** : tests, couverture,
-dépendances, construction de l'image et épreuve du conteneur ont tous tourné sur
-un runner. La livraison continue est **configurée mais pas encore exécutée** —
-les pas de publication se sont correctement abstenus sur les branches de
-travail, mais aucune image n'a encore été poussée sur Docker Hub.
+Les deux moitiés sont **éprouvées en conditions réelles**. L'intégration
+continue — tests, couverture, dépendances, construction de l'image et épreuve du
+conteneur — a tourné sur un runner. La livraison continue a publié son image sur
+Docker Hub à la fusion de la chaîne dans `main`, sous deux étiquettes : `latest`
+et le SHA du commit, de tailles identiques à l'octet, preuve qu'aucune
+reconstruction n'a eu lieu entre l'épreuve et la publication.
+
+Les pas de publication se sont par ailleurs correctement abstenus sur chaque
+branche de travail, où seuls la construction et le test de fumée s'exécutent.
 
 ## Suivi des expériences
 
@@ -202,16 +306,27 @@ données. Aucune n'est privilégiée : le choix est multicritère et appartient 
 notebook de comparaison, qui pose l'alias en appelant
 `training.promouvoir_champion`.
 
-L'API chargera ensuite le modèle sans rien savoir de son identité :
+MLflow 3 ayant supprimé les *stages* (`Staging`, `Production`) au profit des
+alias, c'est `champion` qui tient ce rôle.
 
-```python
-mlflow.sklearn.load_model("models:/agritech-rendement@champion")
-```
+**Déplacer l'alias ne déploie rien.** L'API sert `models/modele_api.joblib`,
+embarqué dans son image et scellé par une empreinte SHA-256 vérifiée au
+démarrage du conteneur. Le registre n'est une source de chargement que si
+`AGRITECH_MODEL_URI` est posée, et il est alors résolu **une seule fois au
+démarrage**, sur un *second* modèle enregistré — `agritech-rendement-api`,
+publié par `scripts/export_api_model.py`.
 
-Changer de modèle en production revient donc à déplacer cet alias, sans toucher
-au code de l'API ni la redéployer. MLflow 3 ayant supprimé les *stages*
-(`Staging`, `Production`) au profit des alias, c'est `champion` qui tient ce
-rôle.
+Changer le modèle servi demande donc quatre temps :
+
+1. promouvoir l'alias depuis le notebook de comparaison ;
+2. `uv run python scripts/export_api_model.py`, qui réexporte l'artefact, sa
+   provenance et son empreinte ;
+3. committer ce nouvel artefact ;
+4. laisser la chaîne CI/CD construire et publier l'image.
+
+La chaîne GitHub Actions **n'interroge jamais MLflow** : elle emballe l'artefact
+versionné, elle ne l'exporte pas. Son test de fumée vérifie d'ailleurs l'absence
+de MLflow dans l'image. C'est ce qui rend chaque image traçable à un commit.
 
 ### Modèles exportés
 
@@ -230,13 +345,13 @@ tranche sur le seul RMSE, pour les besoins de la CI.
 repart des CSV sources et reconstruit tout.
 
 ```bash
-uv sync                                   # versions exactes figées par uv.lock
-# 1. notebooks/exploratory_data_analysis.ipynb
-# 2. notebooks/data_preparation.ipynb      -> data/processed/
-# 3. notebooks/data_split.ipynb            -> data/processed/splits/
-uv run python scripts/train.py            # ~30 min, 4 études × 100 essais
-# 4. notebooks/model_experimentation.ipynb -> figures, modèle final, alias
+uv sync                                                 # versions figées par uv.lock
+uv run python scripts/run_pipeline.py --jusqua export   # ~30 min, 4 études × 100 essais
+# puis notebooks/model_experimentation.ipynb            -> figures, modèle final, alias
 ```
+
+Les notebooks d'exploration et de préparation restent utiles pour *comprendre*
+ce que la chaîne fait, mais ils ne sont plus nécessaires pour la rejouer.
 
 Ce qui garantit l'identité des résultats : `uv.lock` fige les versions, les
 graines sont fixées à 42 partout (`SPLIT_RANDOM_STATE` pour le découpage,
