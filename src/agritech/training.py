@@ -559,10 +559,11 @@ def promouvoir_champion(nom_modele: str,
     au notebook de comparaison. Cette fonction ne fait qu'enregistrer sa
     décision.
 
-    Une fois l'alias posé, l'API chargera
-    `models:/agritech-rendement@champion` sans rien connaître du modèle qu'il
-    désigne. Changer de modèle en production reviendra à rappeler cette
-    fonction — pas à redéployer l'API.
+    Une fois l'alias posé, la décision est enregistrée — mais rien n'est
+    déployé. L'API sert `models/modele_api.joblib`, embarqué dans son image et
+    scellé par une empreinte vérifiée au démarrage. Il faut donc réexporter cet
+    artefact (`scripts/export_api_model.py`), le committer, puis laisser la
+    chaîne CI/CD construire et publier la nouvelle image.
 
     La version retenue est la **plus récente** parmi celles qui portent ce nom
     de modèle *et* la génération de données courante : un réentraînement crée
