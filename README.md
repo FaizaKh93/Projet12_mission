@@ -2,61 +2,177 @@
 
 [![CI/CD](https://github.com/FaizaKh93/Projet12_mission/actions/workflows/ci_cd.yml/badge.svg)](https://github.com/FaizaKh93/Projet12_mission/actions/workflows/ci_cd.yml)
 
-Prototype MLOps : une API de prédiction du rendement agricole et de recommandation
-de culture, interrogée par une interface Streamlit.
+Agritech Answers répond à deux questions qu'un agriculteur se pose avant de semer : **quel rendement attendre de cette parcelle**, et **comment les six cultures se comparent une fois les charges déduites**. Huit informations suffisent — pluviométrie, température, fertilisation, irrigation, culture envisagée, plus trois caractéristiques facultatives de la parcelle.
 
-## Structure
+La seconde réponse est une **marge brute simulée** — rendement estimé × prix de référence − charges saisies par l'utilisateur. C'est un ordre de grandeur pour comparer, pas une recommandation agronomique validée.
+
+Le modèle est servi par une API FastAPI, interrogée par une interface Streamlit. Le tout est reproductible de bout en bout : un clone neuf rejoue la préparation des données, l'entraînement et l'export par une suite de commandes, et une chaîne d'intégration continue éprouve l'ensemble à chaque poussée.
+
+**Dépôt** — <https://github.com/FaizaKh93/Projet12_mission>
+
+## Sommaire
+
+1. [Structure du projet](#1-structure-du-projet)
+2. [Installation et démarrage](#2-installation-et-démarrage)
+3. [Le pipeline MLOps](#3-le-pipeline-mlops)
+4. [Le pipeline CI/CD](#4-le-pipeline-cicd)
+5. [Suivi des expériences et registre MLflow](#5-suivi-des-expériences-et-registre-mlflow)
+6. [Fonctionnement de l'application](#6-fonctionnement-de-lapplication)
+7. [Limites et perspectives](#7-limites-et-perspectives)
+
+---
+
+## 1. Structure du projet
 
 ```
-src/agritech/config.py          chemins, graines, vocabulaire, hypothèses (valeurs seules)
-src/agritech/training.py        prétraitement, modèles, optimisation Optuna, runs MLflow
-src/agritech/evaluation.py      métriques de prédiction, économiques et de recommandation
-src/agritech/preprocessing.py   reconstruction des 13 variables à partir des 8 saisies
-src/agritech/preparation.py     construction du dataset consolidé, en fonctions pures
-src/agritech/decoupage.py       découpage train/val/test et ses garde-fous
-src/agritech/pipeline.py        orchestration des quatre étapes et leurs empreintes
-api/                            service FastAPI, schémas Pydantic, journal des appels
-app/app.py                      interface Streamlit, qui interroge l'API en HTTP
-Dockerfile                      image de service : ni MLflow, ni données, ni uv
-scripts/prepare_data.py         point d'entrée — préparation
-scripts/split_data.py           point d'entrée — découpage
-scripts/run_pipeline.py         point d'entrée — la chaîne entière
-scripts/train.py                point d'entrée de l'entraînement
-scripts/smoke_docker.py         épreuve d'un conteneur réel (bibliothèque standard seule)
-tests/                          suite pytest : API, interface, parité du prétraitement
-.github/workflows/ci_cd.yml     chaîne d'intégration et de livraison continues
-models/                         modèles optimisés en .joblib (un seul versionné)
-data/OC_InputData/              jeux de données sources (non versionnés)
-data/interim/                   artefacts intermédiaires reconstructibles
-data/processed/                 dataset consolidé (CSV livrable + Parquet de travail)
-data/processed/splits/          train / val / test et leurs métadonnées
-notebooks/                      exploration, préparation, découpage, expérimentation
-reports/                        rapports destinés aux agriculteurs, et leurs figures
+src/agritech/      la bibliothèque du projet — importée, jamais exécutée
+api/               service FastAPI
+app/               interface Streamlit
+scripts/           points d'entrée exécutables
+tests/             suite pytest
+notebooks/         exploration et analyse
+data/              jeux de données — non versionnés
+models/            artefacts de modèle
+reports/           rapports d'étape et figures
+.github/           chaîne CI/CD et configuration Dependabot
+Dockerfile         image de service
+pyproject.toml     dépendances, groupes, couverture
+uv.lock            versions exactes — la seule source de vérité
 ```
 
-Deux publics, deux endroits : `reports/` s'adresse aux **agriculteurs** —
-tableaux, figures, aucun jargon. Tout ce qui relève du **développement**,
-chaîne CI/CD comprise, se documente dans ce README.
+### Les composants et leurs responsabilités
 
-Le contenu de `data/` n'est pas versionné : il se reconstruit en exécutant les
-notebooks dans l'ordre `exploratory_data_analysis` → `data_preparation` → `data_split`.
+| Chemin | Rôle |
+|---|---|
+| **Bibliothèque** | |
+| `src/agritech/config.py` | chemins, graines, vocabulaire, hypothèses — des valeurs, aucune fonction |
+| `src/agritech/preparation.py` | construction du dataset consolidé, en fonctions pures |
+| `src/agritech/decoupage.py` | découpage train/val/test et ses garde-fous |
+| `src/agritech/pipeline.py` | orchestration des quatre étapes et de leurs empreintes |
+| `src/agritech/preprocessing.py` | reconstruction des 13 variables du modèle à partir des 8 saisies |
+| `src/agritech/training.py` | modèles, optimisation Optuna, journalisation MLflow |
+| `src/agritech/evaluation.py` | métriques de prédiction, économiques et de recommandation |
+| **Service et interface** | |
+| `api/main.py` · `api/schemas.py` | les six routes et leurs contrats Pydantic |
+| `api/service.py` | chargement du modèle, vérification de son empreinte, prédiction |
+| `api/journal.py` | journal des appels, servi par `/logs` |
+| `app/app.py` | interface Streamlit, qui interroge l'API en HTTP |
+| `Dockerfile` | image de service : ni MLflow, ni données, ni uv |
+| **Points d'entrée** | |
+| `scripts/run_pipeline.py` | la chaîne entière, d'une étape à une autre |
+| `scripts/prepare_data.py` | préparation — produit `data/processed/` |
+| `scripts/split_data.py` | découpage — produit `data/processed/splits/` |
+| `scripts/train.py` | entraînement — 4 études × 100 essais Optuna |
+| `scripts/export_api_model.py` | export de l'artefact servi et de sa provenance |
+| `scripts/smoke_docker.py` | épreuve d'un conteneur réel, bibliothèque standard seule |
+| `scripts/build_report_figures.py` | figures des rapports |
+| **Données** | |
+| `data/OC_InputData/` | les six fichiers sources |
+| `data/interim/` | panel FAO, référentiel par culture, dictionnaire des variables |
+| `data/processed/` | dataset consolidé — CSV livrable et Parquet de travail |
+| `data/processed/splits/` | train / val / test et leurs métadonnées |
+| **Modèles** | |
+| `models/modele_final.joblib` | le modèle retenu à l'issue de la comparaison |
+| `models/modele_api.joblib` | l'artefact servi par l'API, prétraitement compris |
+| `models/modele_api.json` | sa provenance : registre, version, empreintes, versions des bibliothèques |
+| **Documentation** | |
+| [`reports/data_preparation_summary.md`](reports/data_preparation_summary.md) | construction du dataset consolidé |
+| [`reports/model_experimentation_summary.md`](reports/model_experimentation_summary.md) | comparaison des modèles et choix du Ridge |
+| [`reports/prediction_api_summary.md`](reports/prediction_api_summary.md) | conception de l'API |
+| [`reports/streamlit_app_summary.md`](reports/streamlit_app_summary.md) | conception de l'interface |
 
-## Démarrage
+**Deux endroits, deux usages.** `reports/` s'adresse d'abord au lecteur métier — tableaux, figures, aucun jargon. Ce README porte ce qui relève du développement. Et `data/` n'est pas versionné : il se reconstruit par le pipeline, jamais à la main.
+
+---
+
+## 2. Installation et démarrage
+
+### Prérequis
+
+Python 3.12 et [uv](https://docs.astral.sh/uv/). Docker Desktop si vous voulez construire ou lancer l'image. Les jeux de données sources ne sont pas dans le dépôt : il faut les placer dans `data/OC_InputData/` avant de lancer la préparation.
+
+### Cloner et installer
 
 ```bash
-uv sync                # crée .venv, installe les dépendances et le paquet agritech
+git clone https://github.com/FaizaKh93/Projet12_mission.git
+cd Projet12_mission
+uv sync          # crée .venv, installe les dépendances et le paquet agritech
 ```
 
-Le projet est installé en mode éditable : `from agritech.config import ...`
-fonctionne depuis les notebooks, les scripts et les tests, sans manipulation
-de `sys.path`.
+Le projet est installé en mode éditable : `from agritech.config import ...` fonctionne depuis les notebooks, les scripts et les tests, sans manipulation de `sys.path`. Préfixer une commande par `uv run` l'exécute dans l'environnement du projet sans avoir à l'activer.
 
-Ouvrir ensuite les notebooks dans VS Code en sélectionnant le noyau
-`.venv\Scripts\python.exe`, ou lancer `uv run jupyter lab` pour travailler
-dans le navigateur. Préfixer une commande par `uv run` l'exécute dans
-l'environnement du projet sans avoir à l'activer.
+Les deux pièces se lancent séparément, dans deux terminaux, et dans cet ordre : l'interface ne sait rien faire sans le service.
 
-## Chaîne MLOps
+### Lancer l'API — FastAPI
+
+Le service porte le modèle. Il expose six routes HTTP, vérifie l'empreinte de l'artefact puis le charge au démarrage, et n'a **aucune interface** : il répond en JSON. C'est lui qui calcule les rendements, les intervalles et les marges.
+
+```bash
+uv run uvicorn api.main:app --port 8000
+```
+
+Il répond alors sur `http://localhost:8000`. Deux adresses valent le détour :
+
+- `http://localhost:8000/docs` — la documentation interactive, générée depuis les schémas Pydantic, qui permet d'essayer chaque route depuis le navigateur ;
+- `http://localhost:8000/health` — l'état du service et la provenance du modèle chargé, pour vérifier d'un coup d'œil qu'il a bien démarré.
+
+L'option `--reload` recharge le service à chaque modification du code, pratique en développement.
+
+### Lancer l'interface — Streamlit
+
+L'interface est ce que voit l'agriculteur. Elle n'importe ni FastAPI, ni scikit-learn, ni le modèle : elle interroge le service **en HTTP** et met en forme ses réponses. Deux modes — estimer le rendement d'une parcelle, ou comparer les six cultures sur leur rendement et leur marge brute.
+
+Dans un **second terminal**, le service devant déjà tourner :
+
+```bash
+uv run streamlit run app/app.py
+```
+
+Elle s'ouvre sur `http://localhost:8501`. Si le service écoute ailleurs — autre port, autre machine, conteneur —, il faut le lui indiquer :
+
+```powershell
+$env:AGRITECH_API_URL = "http://localhost:8080"   # PowerShell
+uv run streamlit run app/app.py
+```
+
+Sans service joignable, l'interface affiche l'adresse qu'elle a tentée et la commande pour démarrer le conteneur, plutôt qu'une page vide.
+
+### Partir de l'image publiée
+
+La chaîne de livraison publie l'image sur Docker Hub à chaque fusion dans `main`. Pour s'en servir sans cloner le dépôt :
+
+```bash
+docker pull faiza7/agritech-api:latest
+docker run -d --name agritech-api -p 8000:8000 faiza7/agritech-api:latest
+```
+
+L'image pèse environ 146 Mo et embarque son modèle : ni données, ni MLflow, ni uv. Deux étiquettes sont publiées — `latest`, qui suit `main`, et le SHA du commit, qui rattache chaque image à son code.
+
+### Disponibilité et hébergement
+
+**Aucune instance publique n'est hébergée.** Un agriculteur ne peut donc pas, aujourd'hui, utiliser l'outil sans installer quelque chose. Les deux parcours ci-dessus supposent une machine avec Python ou Docker. L'hébergement du service et de l'interface reste à faire.
+
+### Variables d'environnement et secrets
+
+Le projet lit exactement **deux variables**, et aucune n'est un secret.
+
+| Variable | Lue par | Défaut | Rôle |
+|---|---|---|---|
+| `AGRITECH_API_URL` | `app/app.py` | `http://localhost:8000` | adresse du service, indispensable si l'interface et l'API ne sont pas sur la même machine |
+| `AGRITECH_MODEL_URI` | `api/service.py` | absente | bascule du joblib embarqué vers le registre MLflow — `models:/agritech-rendement-api@champion` |
+
+Deux réglages sont en revanche nécessaires **côté GitHub**, pour que la livraison puisse publier :
+
+| Nom | Où | Valeur |
+|---|---|---|
+| `DOCKERHUB_USERNAME` | Settings → Secrets and variables → Actions → **Variables** | le nom de compte Docker Hub |
+| `DOCKERHUB_TOKEN` | idem → **Secrets** | un jeton dédié à la CI, niveau **Repo Read & Write** |
+
+Un jeton Docker Hub personnel ne peut pas être restreint à un seul dépôt : sa permission vaut pour tout le compte. D'où l'intérêt d'un jeton dédié, révocable sans toucher à l'usage quotidien, et du niveau minimal — jamais *Repo Read, Write, Delete*.
+
+---
+
+## 3. Le pipeline MLOps
 
 ```
 préparation  →  découpage  →  entraînement  →  export
@@ -64,61 +180,88 @@ préparation  →  découpage  →  entraînement  →  export
 ```
 
 ```bash
-uv run python scripts/run_pipeline.py                      # préparation + découpage
-uv run python scripts/run_pipeline.py --jusqua export      # tout, entraînement compris
+uv run python scripts/run_pipeline.py                        # préparation + découpage
+uv run python scripts/run_pipeline.py --jusqua entrainement  # + les 4 études Optuna
+uv run python scripts/run_pipeline.py --depuis export        # après le choix du champion
 ```
 
-### Où vit le code, et pourquoi
+La chaîne ne va pas d'un trait jusqu'au bout, et c'est voulu : entre l'entraînement et l'export s'intercale une **décision humaine**, celle du modèle à déployer.
 
-La transformation des données était écrite dans les notebooks. Un notebook ne se
-rejoue pas : il s'ouvre, se fait dérouler cellule après cellule, et rien ne
-garantit l'ordre ni l'état des variables. Le livrable n'était donc reproductible
-que par un humain attentif.
+### Les deux jeux de données
 
-La logique vit maintenant dans trois modules de `src/agritech/`, en fonctions
-**pures** — elles prennent des tables, en rendent d'autres, n'écrivent rien et
-n'affichent rien. Les notebooks les appellent pour commenter leurs sorties ; les
-scripts les appellent pour produire le livrable. Les deux chemins traversent le
-même code, donc ne peuvent pas diverger.
+- **Agriculture Crop Yield** — 1 000 000 de parcelles simulées, cible `Yield_tons_per_hectare`.
+- **Crop Yield Prediction** — données FAO par pays × année × culture, et ses quatre fichiers sources.
 
-Les notebooks gardent tout le reste : contrôles qualité, validation hors
-échantillon, analyses de redondance, figures. C'est leur rôle — expliquer et
-justifier, pas exécuter.
+Les deux ne se joignent pas : le premier décrit des parcelles sans localisation, le second des moyennes nationales annuelles. Le second sert donc de **référentiel par culture**, pas de source de jointure. Le raisonnement est détaillé dans [`reports/data_preparation_summary.md`](reports/data_preparation_summary.md).
 
-**Un seul producteur.** Les notebooks n'écrivent **aucun jeu de données** — ni
-CSV, ni Parquet, ni artefact intermédiaire, pas même temporaire. Ils calculent
-en mémoire, commentent, puis confrontent leur résultat aux fichiers que les
-scripts ont produits. Aucune ambiguïté n'est donc possible sur le fichier qui
-fait foi, et un « Run All » ne peut pas réécrire `data/` par surprise. Les
-seules écritures d'un notebook vont dans `reports/figures/` : ce sont les
-figures du rapport métier, pas des données.
+### Préparation et enrichissement
 
-### Les deux empreintes
+`scripts/prepare_data.py` nettoie les six fichiers, construit le panel FAO, en dérive un référentiel par culture, puis enrichit chaque parcelle. Il produit **999 769 lignes × 14 colonnes** — 13 variables explicatives et la cible.
+
+L'orge et le coton n'ont pas d'équivalent dans le référentiel FAO. Leurs indicateurs restent `NaN` plutôt que de recevoir une valeur fabriquée, et la variable `crop_in_fao_reference` rend cette absence lisible par le modèle.
+
+### Les 13 variables du modèle
+
+| Famille | Variables |
+|---|---|
+| Quantitatives | `Rainfall_mm`, `Temperature_Celsius` |
+| Booléennes | `Fertilizer_Used`, `Irrigation_Used`, `low_rain_no_irrigation` |
+| Catégorielles | `Region`, `Soil_Type`, `Crop`, `Weather_Condition` |
+| Référentiel FAO | `crop_productivity_index`, `crop_yield_geo_cv`, `crop_yield_trend_decade`, `crop_in_fao_reference` |
+
+L'agriculteur n'en saisit que **huit** : pluviométrie, température, fertilisation, irrigation et culture envisagée, plus trois caractéristiques facultatives — région, type de sol et condition météo. Les cinq autres — `low_rain_no_irrigation` et les quatre indicateurs FAO — sont *calculées* par `agritech.preprocessing`, qui part avec le modèle dans l'artefact. Les exposer permettrait de décrire une parcelle impossible — 800 mm de pluie, irriguée, et pourtant en situation de faible pluviométrie sans irrigation.
+
+### Découpage et prévention des fuites
+
+70 / 15 / 15, stratifié par culture, graine fixée à 42 : **699 837** lignes d'entraînement, **149 966** de validation, **149 966** de test.
+
+- Les transformations qui s'ajustent sur les données — imputation, encodage, mise à l'échelle — sont apprises **sur `train` seul**.
+- `val` sert à comparer les modèles et à optimiser les hyperparamètres.
+- `test` est réservé à l'évaluation finale. Il peut être relu pour reproduire un résultat, mais ne doit intervenir dans **aucune décision** de modélisation : modifier le modèle après avoir vu ses performances sur `test` ferait perdre à cette mesure son indépendance.
+
+### Entraînement, évaluation et sélection
+
+`scripts/train.py` lance quatre études — `dummy`, `ridge`, `histgbm`, `lightgbm` — de 100 essais Optuna chacune. Chaque étude est un run parent, chaque essai un run enfant, et seul le meilleur essai sérialise un modèle.
+
+Aucune version n'est privilégiée automatiquement. Le choix est **multicritère et humain** : erreur, stabilité par culture, latence, interprétabilité. Il se fait dans `notebooks/model_experimentation.ipynb`, dont les opérations d'écriture sont protégées par un verrou `PUBLIER = False` — un simple *Run All* de consultation ne peut ni journaliser, ni exporter, ni promouvoir.
+
+Le modèle retenu est un **Ridge**. Sur le jeu de test, qui n'a servi à aucune décision :
+
+| | `val` | `test` |
+|---|---|---|
+| RMSE (t/ha) | 0,5004 | **0,5013** |
+| MAE (t/ha) | 0,3993 | 0,3998 |
+| R² | 0,9132 | **0,9121** |
+| MAE (€/ha, à 200 €/t) | 79,87 | 79,96 |
+
+Le run d'évaluation finale enregistre un écart val/test sur le RMSE de **0,0008 t/ha** — calculé sur les valeurs non arrondies, d'où le léger décalage avec les deux chiffres du tableau. Cette proximité ne révèle pas de dégradation de la généralisation sur le jeu tenu à l'écart. Elle ne démontre pas pour autant l'absence de tout surapprentissage à la validation, qui a servi à optimiser les hyperparamètres. Le détail de la comparaison est dans [`reports/model_experimentation_summary.md`](reports/model_experimentation_summary.md).
+
+### Séparation des responsabilités : scripts et notebooks
+
+La logique de transformation vit dans `src/agritech/`, en fonctions **pures** : elles prennent des tables, en rendent d'autres, n'écrivent rien et n'affichent rien. Les scripts les appellent pour produire le livrable, les notebooks pour commenter leurs sorties. Les deux chemins traversent le même code, donc ne peuvent pas diverger.
+
+**Un seul producteur.** Les notebooks n'écrivent **aucun jeu de données** — ni CSV, ni Parquet, ni artefact intermédiaire, pas même temporaire. Ils calculent en mémoire, puis confrontent leur résultat aux fichiers que les scripts ont produits. En usage courant, leurs seules écritures vont dans `reports/figures/` : ce sont des figures, pas des données.
+
+Une exception, et elle est explicite. `model_experimentation.ipynb` porte la décision du champion : journaliser l'évaluation finale, exporter `modele_final.joblib`, déplacer l'alias. Ces trois opérations sont protégées par `PUBLIER = False` et ne s'exécutent que si l'on bascule ce verrou — une décision, jamais un effet de bord.
+
+### `data_version` et `split_version`
 
 | | Porte sur | Répond à |
 |---|---|---|
 | `data_version` | le contenu du dataset consolidé | de quel **dataset** ce run provient-il ? |
 | `split_version` | les octets des trois partitions | de quels **fichiers** l'entraînement a-t-il lu ? |
 
-Chaque run MLflow et la provenance de l'artefact déployé les portent toutes les
-deux. Deux runs d'empreintes différentes ne sont pas comparables — et c'est ce
-que la chaîne vérifie avant d'agir.
+Chaque run MLflow et la provenance de l'artefact déployé portent les deux. Deux runs d'empreintes différentes ne sont pas comparables — et c'est ce que la chaîne vérifie avant d'agir.
 
 ### Ce que la chaîne refuse de faire
 
-**Écraser un dataset différent.** `prepare_data.py` régénère puis compare avant
-d'écrire. Si le contenu diffère de celui du disque, il s'arrête : réécrire
-changerait `data_version` et périmerait tous les runs existants.
+**Écraser un dataset différent.** `prepare_data.py` régénère puis compare avant d'écrire. Si le contenu diffère de celui du disque, il s'arrête : réécrire changerait `data_version` et périmerait tous les runs existants.
 
-**Réécrire des partitions.** Elles sont produites une fois, puis relues par
-chaque entraînement. Le script refuse dans trois cas — lot incomplet, vestige
-d'une exécution interrompue dont les fichiers peuvent provenir de découpages
-différents ; partitions périmées, générées pour un autre dataset ; et lot
-complet déjà à jour, où il vérifie sans toucher.
+**Reconstruire un lot partiel.** Les cinq fichiers de la préparation forment un ensemble. S'il en manque, les autres peuvent décrire un autre dataset.
 
-**Entraîner sans qu'on le lui demande.** Une demi-heure de calcul et des
-écritures dans le registre ne doivent pas être la conséquence d'une commande
-tapée distraitement. Par défaut la chaîne s'arrête au découpage.
+**Réécrire des partitions.** Elles sont produites une fois, puis relues par chaque entraînement. Le script refuse devant un lot incomplet — vestige d'une exécution interrompue — comme devant des partitions périmées, générées pour un autre dataset.
+
+**Entraîner sans qu'on le lui demande.** Une demi-heure de calcul et des écritures au registre ne doivent pas être la conséquence d'une commande tapée distraitement. Par défaut la chaîne s'arrête au découpage.
 
 `--forcer` lève ces refus, un par un, pour les régénérations voulues.
 
@@ -128,52 +271,40 @@ tapée distraitement. Par défaut la chaîne s'arrête au découpage.
 uv run python scripts/prepare_data.py --verifier
 ```
 
-Régénère le dataset dans un dossier temporaire et le compare à celui du disque,
-sur deux plans distincts : le **contenu** — colonnes, types, valeurs — et les
-**octets**. Les deux peuvent diverger : une autre version de pyarrow sérialise
-le même tableau différemment, auquel cas les données sont identiques mais
-`data_version` change. Il vaut mieux le savoir avant d'écraser quoi que ce soit.
+Régénère le dataset dans un dossier temporaire et le compare à celui du disque, sur deux plans distincts : le **contenu** — colonnes, types, valeurs — et les **octets**. Les deux peuvent diverger : une autre version de pyarrow sérialise le même tableau différemment, auquel cas les données sont identiques mais `data_version` change. Mieux vaut le savoir avant d'écraser quoi que ce soit.
 
-C'est ce contrôle qui a autorisé l'extraction : la chaîne extraite reproduit le
-dataset livré à l'octet près, `data_version c9547cbd218b`, celui-là même que
-cite la provenance de l'artefact servi par l'API.
+### Rejouer le projet depuis un clone neuf
 
-### Ce qui est éprouvé en intégration continue
+`export_api_model.py` lit l'alias `champion` au registre et **s'arrête s'il n'en trouve pas**, en renvoyant vers le notebook de comparaison. Sur un clone neuf, où l'entraînement publie des versions sans en privilégier aucune, l'ordre est donc le suivant :
 
-`tests/test_pipeline.py` fait tourner la chaîne sur six tables minuscules
-construites dans le test : rendement négatif retiré, cible manquante conservée,
-pluie illisible transformée en absence, cardinalité validée avant jointure,
-`NaN` préservés pour les cultures sans référence FAO, ordre des colonnes du
-livrable, et les refus du découpage. Aucune donnée n'est nécessaire.
+```bash
+uv sync                                                      # versions figées par uv.lock
+uv run python scripts/run_pipeline.py --jusqua entrainement  # ~30 min, 4 études × 100 essais
+# notebooks/model_experimentation.ipynb : comparer, choisir, puis PUBLIER = True
+uv run python scripts/run_pipeline.py --depuis export        # artefact servi et provenance
+```
 
-Ce que la CI ne peut pas porter, c'est « le pipeline reproduit le dataset
-livré » — il demande le million de lignes. C'est `--verifier` qui s'en charge,
-sur un poste qui a les données.
+Ce qui garantit l'identité des résultats : `uv.lock` fige les versions, les graines sont fixées à 42 partout, et `training.ESPACES` est la **source unique** des bornes de recherche — consommée à l'entraînement, relue par le notebook pour reconstituer les études Optuna depuis MLflow.
 
-## Intégration et livraison continues
+---
 
-[`.github/workflows/ci_cd.yml`](.github/workflows/ci_cd.yml) — une chaîne, deux
-jobs, déclenchée sur **toute poussée** quelle que soit la branche, et à
-l'**ouverture** d'une proposition de fusion.
+## 4. Le pipeline CI/CD
+
+[`.github/workflows/ci_cd.yml`](.github/workflows/ci_cd.yml) — une chaîne, deux jobs.
 
 ```
 CI · Contrôles  ──→  CI · Image et conteneur → CD · Publication
 ```
 
-### Ce que chaque job prouve
+### Déclencheurs
 
-**`CI · Contrôles`** installe l'environnement figé par `uv.lock`, lance la suite
-de tests **sous Linux** — alors que le développement se fait sous Windows —
-avec un plancher de couverture à 90 %, puis vérifie que les deux
-`requirements.txt` livrés décrivent encore le lock. Ces fichiers sont exigés par
-le cahier des charges, mais ils sont **dérivés** : `uv.lock` reste la seule
-source de vérité, et toute divergence fait échouer la chaîne.
+Toute poussée, sur n'importe quelle branche, et les événements d'ouverture d'une proposition de fusion. Les deux se complètent : `push` éprouve la branche, `pull_request` éprouve `refs/pull/N/merge`, c'est-à-dire le **résultat de la fusion** dans `main`. Deux objets distincts, deux vérifications.
 
-**`CI · Image et conteneur → CD · Publication`** construit l'image, la charge
-dans le démon du runner et l'éprouve avec `scripts/smoke_docker.py` : un
-conteneur réel démarre, ses routes sont interrogées en HTTP, l'absence de MLflow
-et de PyArrow est vérifiée, et un artefact falsifié doit **empêcher** le
-démarrage.
+### Les deux jobs
+
+**`CI · Contrôles`** installe l'environnement figé par `uv.lock`, lance la suite de tests **sous Linux** — alors que le développement se fait sous Windows — avec un plancher de couverture à 90 %, puis vérifie que les deux `requirements.txt` livrés décrivent encore le lock. Ces fichiers sont exigés par le cahier des charges, mais ils sont **dérivés** : `uv.lock` reste la seule source de vérité, et toute divergence fait échouer la chaîne.
+
+**`CI · Image et conteneur → CD · Publication`** construit l'image, la charge dans le démon du runner et l'éprouve avec `scripts/smoke_docker.py` : un conteneur réel démarre, ses routes sont interrogées en HTTP, l'absence de MLflow et de PyArrow est vérifiée, et un artefact falsifié doit **empêcher** le démarrage.
 
 La livraison ne s'exécute qu'après une poussée sur `main` :
 
@@ -181,17 +312,11 @@ La livraison ne s'exécute qu'après une poussée sur `main` :
 if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 ```
 
-Une proposition de fusion construit donc son image et l'éprouve, mais ne touche
-ni aux identifiants ni au registre. L'image publiée n'est **jamais
-reconstruite** : `docker tag` renomme celle qui vient de passer les tests, de
-sorte que les octets publiés sont exactement les octets éprouvés. Deux
-étiquettes partent : `latest`, qui suit la branche, et le SHA du commit, qui
-rattache chaque image à son code.
+Une proposition de fusion construit donc son image et l'éprouve, mais ne touche ni aux identifiants ni au registre. L'image publiée n'est **jamais reconstruite** : `docker tag` renomme celle qui vient de passer les tests, de sorte que les octets publiés sont exactement les octets éprouvés.
 
 ### Ce qui n'est pas vérifié en intégration continue
 
-Dix tests sont ignorés sur un runner. Le résumé de chaque exécution les nomme,
-avec leur motif.
+Dix tests sont ignorés sur un runner. Le résumé de chaque exécution les nomme, avec leur motif.
 
 | Tests | Pourquoi |
 |---|---|
@@ -199,15 +324,9 @@ avec leur motif.
 | 1 contrôle des bornes du domaine (`test_api.py`) | il confronte `config.py` aux minima et maxima réellement observés dans `train` |
 | 1 parité avec le registre (`test_api.py`) | `mlflow.db` n'existe pas sur un runner |
 
-Ce ne sont **pas** des tests désactivés. Ils s'exécutent intégralement sur un
-poste qui possède les données, et c'est là qu'ils doivent passer avant toute
-fusion. Fabriquer un jeu de données pour les faire tourner en CI les rendrait
-tautologiques : inventer la référence, puis vérifier qu'on la retrouve.
+Ce ne sont **pas** des tests désactivés. Ils s'exécutent intégralement sur un poste qui possède les données, et c'est là qu'ils doivent passer avant toute fusion. Fabriquer un jeu de données pour les faire tourner en CI les rendrait tautologiques : inventer la référence, puis vérifier qu'on la retrouve.
 
-Tout le reste du module de prétraitement s'éprouve bien en CI, sur l'**artefact
-déployé** — `models/modele_api.joblib` embarque la table FAO ajustée à
-l'entraînement, donc les règles de dérivation se vérifient sans aucune donnée,
-et sur la pièce effectivement livrée.
+Tout le reste du module de prétraitement s'éprouve bien en CI, sur l'**artefact déployé** : `models/modele_api.joblib` embarque la table FAO ajustée à l'entraînement, donc les règles de dérivation se vérifient sans aucune donnée, et sur la pièce effectivement livrée.
 
 ### Reproduire les contrôles localement
 
@@ -224,175 +343,132 @@ docker build -t agritech-api:ci .
 uv run python scripts/smoke_docker.py --image agritech-api:ci
 ```
 
-### Ce que le dépôt doit fournir
+### De la promotion d'un modèle à l'image publiée
 
-| Nom | Où | Valeur |
-|---|---|---|
-| `DOCKERHUB_USERNAME` | Settings → Secrets and variables → Actions → **Variables** | le nom de compte Docker Hub |
-| `DOCKERHUB_TOKEN` | idem → **Secrets** | un jeton dédié à la CI, niveau **Repo Read & Write** |
+La chaîne GitHub Actions **n'interroge jamais MLflow** : elle emballe l'artefact versionné, elle ne l'exporte pas. Son test de fumée vérifie d'ailleurs l'absence de MLflow dans l'image. Changer le modèle servi demande donc quatre temps :
 
-Un jeton Docker Hub personnel **ne peut pas être restreint à un seul dépôt** :
-sa permission vaut pour tout le compte. D'où l'intérêt d'un jeton dédié,
-révocable sans toucher à l'usage quotidien, et du niveau minimal — jamais
-*Repo Read, Write, Delete*.
+1. promouvoir l'alias depuis le notebook de comparaison, avec `PUBLIER = True` ;
+2. `uv run python scripts/export_api_model.py`, qui réexporte l'artefact, sa provenance et son empreinte ;
+3. committer ce nouvel artefact ;
+4. laisser la chaîne construire et publier l'image.
 
-### Versions des actions
+Déplacer un alias ne met à jour ni une image déjà publiée, ni un conteneur en fonctionnement. C'est ce qui rend chaque image traçable à un commit.
 
-Toutes les actions sont épinglées sur un **SHA de commit**, leur numéro de
-version en commentaire. Une étiquette, même `@v7`, peut être déplacée par son
-mainteneur ; un SHA, non. Cela compte surtout pour `docker/login-action`, le
-seul pas qui manipule le jeton.
+### Protection de `main`, épinglage et Dependabot
 
-[`.github/dependabot.yml`](.github/dependabot.yml) les fait vieillir sous
-surveillance, chaque semaine, pour le **seul** écosystème `github-actions`. Y
-déclarer Python ouvrirait des propositions qui modifient `uv.lock` sans toucher
-aux `requirements.txt` exportés : chacune échouerait sur le contrôle de dérive.
-Les mises à jour de *sécurité* Python, elles, arrivent sans configuration.
+`main` est protégée par un *ruleset* actif : suppression interdite, réécriture d'historique interdite, proposition de fusion obligatoire, et les deux contrôles exigés verts avant toute fusion. La liste de dérogation est vide — la règle s'applique aussi à la propriétaire du dépôt.
 
-### État de la chaîne au 29 octobre 2026
+Toutes les actions sont épinglées sur un **SHA de commit**, leur numéro de version en commentaire. Une étiquette, même `@v7`, peut être déplacée par son mainteneur ; un SHA, non. Cela compte surtout pour `docker/login-action`, le seul pas qui manipule le jeton.
 
-Les deux moitiés sont **éprouvées en conditions réelles**. L'intégration
-continue — tests, couverture, dépendances, construction de l'image et épreuve du
-conteneur — a tourné sur un runner. La livraison continue a publié son image sur
-Docker Hub à la fusion de la chaîne dans `main`, sous deux étiquettes : `latest`
-et le SHA du commit, de tailles identiques à l'octet, preuve qu'aucune
-reconstruction n'a eu lieu entre l'épreuve et la publication.
+[`.github/dependabot.yml`](.github/dependabot.yml) les fait vieillir sous surveillance, chaque semaine, pour le **seul** écosystème `github-actions`. Y déclarer Python ouvrirait des propositions qui modifient `uv.lock` sans toucher aux `requirements.txt` exportés : chacune échouerait sur le contrôle de dérive. Les mises à jour de *sécurité* Python, elles, arrivent sans configuration.
 
-Les pas de publication se sont par ailleurs correctement abstenus sur chaque
-branche de travail, où seuls la construction et le test de fumée s'exécutent.
+---
 
-## Suivi des expériences
+## 5. Suivi des expériences et registre MLflow
 
-MLflow 3 a placé le backend fichier (`./mlruns`) en mode maintenance : le suivi
-utilise donc une base **SQLite**, `mlflow.db`, et les artefacts de modèle vont
-dans `mlartifacts/`. Ni l'un ni l'autre n'est versionné.
+### Ouvrir l'interface
+
+MLflow 3 a placé le backend fichier (`./mlruns`) en mode maintenance : le suivi utilise donc une base **SQLite**, `mlflow.db`, et les artefacts de modèle vont dans `mlartifacts/`. Ni l'un ni l'autre n'est versionné.
 
 ```bash
 uv run mlflow ui --backend-store-uri sqlite:///mlflow.db
 ```
 
-Une seule expérience, `agritech-rendement` : les quatre modèles sur les **13
-variables explicatives**. Chaque étude d'optimisation est un run parent, chaque
-essai Optuna un run enfant. Seul le meilleur essai de chaque étude sérialise un
-modèle — un artefact par essai ferait gonfler le stockage de plusieurs
-gigaoctets sans utilité.
+L'interface s'ouvre sur `http://localhost:5000`.
 
-Les essais enfants étant cent fois plus nombreux que les parents, la liste des
-runs est vite saturée. Pour n'afficher que les quatre études :
+### Organisation des runs
+
+Une seule expérience, `agritech-rendement` : les quatre modèles sur les 13 variables. Chaque étude d'optimisation est un run parent, chaque essai Optuna un run enfant. Seul le meilleur essai de chaque étude sérialise un modèle — un artefact par essai ferait gonfler le stockage de plusieurs gigaoctets sans utilité.
+
+Les essais enfants étant cent fois plus nombreux que les parents, la liste est vite saturée. Pour n'afficher que les quatre études :
 
 ```
 tags.phase = 'optimisation'
 ```
 
-et `tags.phase != ''` y ajoute le run d'évaluation finale.
+et `tags.phase != ''` y ajoute le run d'évaluation finale, marqué `phase=test`. Celui-ci est séparé à dessein : mélangées dans un même tri par RMSE, les métriques de `val` et de `test` ne voudraient plus rien dire.
 
 ### Jeux de données attachés aux runs
 
-Chaque run déclare les partitions qui l'ont produit : `train` et `val` pour une
-étude d'optimisation, `val` et `test` pour l'évaluation finale. MLflow n'en
-stocke **pas les données**, seulement le schéma typé, le nombre de lignes, une
-empreinte du contenu et le chemin du fichier.
+Chaque run déclare les partitions qui l'ont produit : `train` et `val` pour une étude d'optimisation, `val` et `test` pour l'évaluation finale. MLflow n'en stocke **pas les données**, seulement le schéma typé, le nombre de lignes, une empreinte du contenu et le chemin du fichier.
 
-Cette empreinte porte sur le contenu ; les tags `data_version` et
-`split_version` portent sur les fichiers. Les deux se complètent — la première
-détecte qu'un contenu a changé, les seconds disent de quelle génération de
-dataset le run provient.
+Cette empreinte porte sur le contenu ; les tags `data_version` et `split_version` portent sur les fichiers. Les deux se complètent — la première détecte qu'un contenu a changé, les seconds disent de quelle génération de dataset le run provient.
 
-### Registre des modèles
+### Registre, versions et alias
 
-`train.py` publie chaque modèle entraîné comme une **version** du modèle
-enregistré `agritech-rendement`, taguée avec l'algorithme et les empreintes de
-données. Aucune n'est privilégiée : le choix est multicritère et appartient au
-notebook de comparaison, qui pose l'alias en appelant
-`training.promouvoir_champion`.
+`train.py` publie chaque modèle entraîné comme une **version** du modèle enregistré `agritech-rendement`, taguée avec l'algorithme et les empreintes de données. Aucune n'est privilégiée : le choix appartient au notebook de comparaison, qui pose l'alias `champion` en appelant `training.promouvoir_champion`.
 
-MLflow 3 ayant supprimé les *stages* (`Staging`, `Production`) au profit des
-alias, c'est `champion` qui tient ce rôle.
+MLflow 3 ayant supprimé les *stages* (`Staging`, `Production`) au profit des alias, c'est `champion` qui tient ce rôle.
 
-**Déplacer l'alias ne déploie rien.** L'API sert `models/modele_api.joblib`,
-embarqué dans son image et scellé par une empreinte SHA-256 vérifiée au
-démarrage du conteneur. Le registre n'est une source de chargement que si
-`AGRITECH_MODEL_URI` est posée, et il est alors résolu **une seule fois au
-démarrage**, sur un *second* modèle enregistré — `agritech-rendement-api`,
-publié par `scripts/export_api_model.py`.
+### Trois artefacts à ne pas confondre
 
-Changer le modèle servi demande donc quatre temps :
+| Artefact | Produit par | Rôle |
+|---|---|---|
+| `models/modele_final.joblib` | le notebook de comparaison | le modèle retenu, livrable de la mission |
+| `models/modele_api.joblib` | `scripts/export_api_model.py` | ce que sert l'API : prétraitement **et** modèle, gelés ensemble |
+| `agritech-rendement-api` au registre | le même script | la même pièce, publiée et aliasée dans MLflow |
 
-1. promouvoir l'alias depuis le notebook de comparaison ;
-2. `uv run python scripts/export_api_model.py`, qui réexporte l'artefact, sa
-   provenance et son empreinte ;
-3. committer ce nouvel artefact ;
-4. laisser la chaîne CI/CD construire et publier l'image.
+Le registre `agritech-rendement` porte les modèles issus de l'entraînement ; `agritech-rendement-api` porte l'artefact destiné au service. Les confondre revient à croire qu'une promotion déploie.
 
-La chaîne GitHub Actions **n'interroge jamais MLflow** : elle emballe l'artefact
-versionné, elle ne l'exporte pas. Son test de fumée vérifie d'ailleurs l'absence
-de MLflow dans l'image. C'est ce qui rend chaque image traçable à un commit.
+---
 
-### Modèles exportés
+## 6. Fonctionnement de l'application
 
-`uv run python scripts/train.py` écrit aussi un `.joblib` par étude dans
-`models/`, nommé `{modèle}_{jeu_de_variables}.joblib`, pour que le notebook de
-comparaison recharge les modèles sans les réajuster.
+### L'API — FastAPI
 
-Seul `models/modele_final.joblib` est versionné — les autres vont jusqu'à 1,3 Mo
-et se régénèrent à l'identique. Il n'est pas désigné automatiquement : le choix
-appartient à `notebooks/model_experimentation.ipynb`. L'option `--export-best`
-tranche sur le seul RMSE, pour les besoins de la CI.
+Le service est **sans état** : il ne stocke rien entre deux appels, hormis le journal des requêtes. Chaque réponse porte, outre son résultat, la provenance du modèle qui l'a produite — registre, version, empreinte — de sorte qu'une prédiction reste rattachable à l'artefact exact qui l'a calculée.
 
-## Rejouer les résultats à l'identique
+Les contrats d'entrée et de sortie sont décrits par des schémas Pydantic : une saisie hors vocabulaire est rejetée en HTTP 422 avec le détail du champ fautif, jamais silencieusement convertie.
 
-`data/`, `mlflow.db` et `mlartifacts/` ne sont pas versionnés : un clone neuf
-repart des CSV sources et reconstruit tout.
+| Route | Ce qu'elle rend |
+|---|---|
+| `POST /predict` | le rendement attendu d'une parcelle et son intervalle à 95 % |
+| `POST /recommend` | les six cultures classées par rendement, et par marge brute si des charges sont fournies |
+| `GET /health` | l'état du service et la provenance du modèle chargé |
+| `GET /model/info` | registre, version, alias, empreintes, versions des bibliothèques |
+| `GET /reference/prices` | les prix de référence par culture, source FAOSTAT 2024, avec leur dispersion |
+| `GET /logs` | le journal des appels, refus compris |
 
-```bash
-uv sync                                                 # versions figées par uv.lock
-uv run python scripts/run_pipeline.py --jusqua export   # ~30 min, 4 études × 100 essais
-# puis notebooks/model_experimentation.ipynb            -> figures, modèle final, alias
-```
+La documentation interactive est servie sur `/docs`.
 
-Les notebooks d'exploration et de préparation restent utiles pour *comprendre*
-ce que la chaîne fait, mais ils ne sont plus nécessaires pour la rejouer.
+### L'artefact embarqué et son empreinte
 
-Ce qui garantit l'identité des résultats : `uv.lock` fige les versions, les
-graines sont fixées à 42 partout (`SPLIT_RANDOM_STATE` pour le découpage,
-`RANDOM_STATE` pour l'échantillonneur TPE et les estimateurs), et
-`training.ESPACES` est la **source unique** des bornes de recherche — consommée
-à l'entraînement, relue par le notebook pour reconstituer les études Optuna
-depuis MLflow.
+L'image ne contient ni MLflow, ni PyArrow, ni uv : elle charge un `.joblib` par pickle standard. Avant de le désérialiser, le service **vérifie son empreinte SHA-256** contre celle inscrite dans `models/modele_api.json`. Un artefact corrompu, tronqué ou remplacé seul empêche alors le démarrage, au lieu de servir des prédictions fausses — comportement éprouvé à chaque exécution de la chaîne par `scripts/smoke_docker.py`.
 
-Les empreintes `data_version` et `split_version`, portées par chaque run, sont
-le contrôle : si elles ne correspondent plus à `split_metadata.json`, le run ne
-décrit pas les données courantes.
+C'est un **contrôle d'intégrité, pas une signature** : il atteste que le `.joblib` est bien celui que décrit son fichier de provenance. Remplacer les deux ensemble passerait le contrôle. Ce qui s'y oppose est ailleurs — les deux fichiers sont versionnés, et toute modification passe par une proposition de fusion sur une branche protégée.
 
-## Jeux de données
+Le registre MLflow n'est une source de chargement que si `AGRITECH_MODEL_URI` est posée, et il est alors résolu **une seule fois au démarrage**.
 
-- **Agriculture Crop Yield** — 1 000 000 parcelles simulées, cible `Yield_tons_per_hectare`.
-- **Crop Yield Prediction** — données FAO pays × année × culture, plus ses quatre fichiers sources.
+### L'interface — Streamlit
 
-## Jeux d'entraînement, de validation et de test
+L'interface n'importe ni FastAPI, ni le modèle : elle interroge le service en HTTP, et les deux pourraient être déployés séparément — sur deux machines, ou l'un en conteneur et l'autre non. C'est `AGRITECH_API_URL` qui les relie.
 
-`data/processed/splits/` contient `train.parquet`, `val.parquet` et `test.parquet`,
-issus du dataset consolidé produit par `notebooks/data_preparation.ipynb`.
-Découpage 70 / 15 / 15, `random_state=42`, stratifié par culture.
+Elle propose deux modes — décrire une parcelle pour en estimer le rendement, ou comparer les six cultures.
 
-### Gestion des partitions
+Le second mode dépasse le rendement. Les six cultures étant statistiquement proches, l'interface permet de saisir les charges opérationnelles par culture et calcule une **marge brute simulée** — rendement × prix − charges —, qui les sépare bien mieux. Le détail de la conception est dans [`reports/streamlit_app_summary.md`](reports/streamlit_app_summary.md).
 
-- Les trois fichiers sont générés **une seule fois** par `notebooks/data_split.ipynb`,
-  puis conservés pour toutes les expérimentations. Le notebook d'entraînement les lit
-  sans jamais les régénérer.
-- Toute modification du dataset consolidé impose de **régénérer les partitions** et de
-  **relancer l'entraînement et l'évaluation**.
-- Chaque run MLflow porte deux tags : `data_version` (empreinte du dataset consolidé)
-  et `split_version` (empreinte des partitions). Des métriques issues de versions
-  différentes ne sont pas directement comparables sans vérifier que le protocole
-  d'évaluation est identique.
+---
 
-### Prévention des fuites
+## 7. Limites et perspectives
 
-- Les transformations qui s'ajustent sur les données — imputation, encodage, mise à
-  l'échelle, sélection de variables — sont apprises **sur `train` seul**.
-- `val` sert à comparer les modèles et à optimiser les hyperparamètres.
-- `test` est réservé à l'**évaluation finale du modèle retenu**. Il peut être relu
-  autant que nécessaire pour reproduire un résultat, mais il ne doit intervenir dans
-  **aucune décision** de modélisation : modifier le modèle après avoir vu ses
-  performances sur `test` ferait perdre à cette mesure son indépendance.
+### Un jeu de données simulé
+
+Le jeu de parcelles est **simulé**, pas observé. Ses modalités sont équilibrées, ses relations régulières, et sa variable `Region` ne correspond à aucune géographie réelle. Un R² de 0,91 décrit donc la capacité du modèle à retrouver une règle de génération, pas sa valeur agronomique sur des parcelles réelles.
+
+Toute conclusion tirée ici devrait être remesurée sur des données de terrain avant d'orienter une décision.
+
+### Ce que la recommandation n'établit pas
+
+Les six cultures rendent des prédictions **très proches** — l'écart entre la meilleure et la pire se compte en dixièmes de tonne par hectare, souvent sous le seuil de 0,1 t/ha que l'API juge discriminant. L'API le signale explicitement plutôt que de laisser croire à un classement net.
+
+Les coefficients du modèle décrivent des **associations dans ce jeu de données**, pas des effets causaux. Qu'une parcelle fertilisée y rende davantage ne garantit pas que fertiliser une parcelle donnée augmentera son rendement d'autant.
+
+Enfin, le modèle **extrapole linéairement** hors du domaine observé — 100 à 1000 mm de pluie, 15 à 40 °C. L'API avertit au-delà, mais ne refuse pas : une saison plus humide que toutes celles observées reste une question légitime, dont la réponse est simplement moins fiable.
+
+### Hypothèses économiques
+
+La marge brute repose sur un prix de référence de 200 €/t, avec une sensibilité calculée à 150, 200 et 300 €/t. Les prix par culture viennent de FAOSTAT 2024 et portent leur dispersion entre pays déclarants. Les charges, elles, sont saisies par l'utilisateur : l'outil ne les présume pas.
+
+### Perspectives
+
+Héberger le service et l'interface, pour qu'un agriculteur n'ait rien à installer. Mesurer la dérive du modèle en production. Et remplacer le jeu simulé par des observations réelles — c'est de loin ce qui changerait le plus la valeur de l'ensemble.
