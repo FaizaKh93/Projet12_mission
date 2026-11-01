@@ -79,7 +79,7 @@ Une sixième — un **indice d'intensification** résumant fertilisation et irri
 
 ### Deux vérifications avant de livrer
 
-**Aucune valeur extrême n'a été supprimée, et c'est un résultat.** Nous avons appliqué une recherche systématique de valeurs aberrantes à toutes les variables quantitatives des cinq fichiers. Elle ne signale rien — pour une raison structurelle : la pluviométrie et la température sont **parfaitement uniformes** (leurs déciles sont réguliers à 0,3 % près), si bien que les seuils de détection tombent en dehors même des valeurs possibles. Quant aux 28 rendements les plus élevés, ils sont exactement en nombre attendu pour un aléa normal — 2 660 observations écartées de plus de trois écarts-types, contre 2 699 attendues. **Ce sont des valeurs rares, pas des erreurs** : les retirer aurait biaisé le modèle vers la moyenne.
+**Aucune valeur extrême n'a été supprimée, et c'est un résultat.** Nous avons appliqué une recherche systématique de valeurs aberrantes à toutes les variables quantitatives des cinq fichiers. Elle ne signale rien — pour une raison structurelle : la pluviométrie et la température sont **parfaitement uniformes** (leurs déciles sont réguliers à 0,3 % près), si bien que les seuils de détection tombent en dehors même des valeurs possibles. Quant aux 28 rendements les plus élevés, ils sont exactement en nombre attendu pour un aléa normal — 2 660 observations situées à plus de trois écarts-types de la moyenne, contre 2 699 attendues — et aucune n'a été retirée. **Ce sont des valeurs rares, pas des erreurs** : les retirer aurait biaisé le modèle vers la moyenne.
 
 **Deux colonnes ont été retirées, chacune pour un motif précis.** Nous avons mesuré la redondance sur l'ensemble des variables numériques, puis étendu l'analyse aux variables qualitatives — nécessaire, car le type de culture détermine entièrement quatre des colonnes construites, ce qu'une analyse purement numérique ne voit pas.
 
@@ -133,7 +133,7 @@ Une question restait ouverte : certaines variables **disent-elles la même chose
 
 *À gauche, la ressemblance entre variables, deux à deux. Seule la diagonale est colorée — c'est-à-dire que chaque variable ne ressemble qu'à elle-même. Toutes les autres cases valent zéro. À droite, l'ACP cherche à résumer les cinq variables en un plus petit nombre d'indicateurs : elle échoue, chaque axe ne captant qu'un cinquième de l'information, soit exactement sa part si rien n'était regroupable.*
 
-**Conclusion de l'ACP : aucune variable ne fait double emploi avec une autre.** Chacune apporte une information qui lui est propre, et il n'existe pas de résumé plus compact de ces données.
+**Conclusion de l'ACP : aucune redondance linéaire notable parmi les cinq variables construites.** Chacune apporte une information qui lui est propre, et il n'existe pas de résumé plus compact de ces cinq-là. L'analyse ne porte pas sur les treize variables du modèle — dont quatre sont entièrement déterminées par la culture ; c'est le contrôle qualitatif décrit plus bas qui traite ce cas.
 
 Une ACP ne détecte toutefois que les ressemblances **linéaires**. Nous avons donc complété par un contrôle direct : un modèle capable de capter n'importe quelle forme de relation a tenté de reconstituer chaque variable à partir des quatre autres. **Il échoue sur les cinq**, avec des performances nulles ou négatives. L'absence de redondance vaut donc aussi hors du linéaire, et les quatre variables clés doivent être conservées telles quelles.
 
@@ -180,6 +180,8 @@ Ce choix est **métier avant d'être technique**, et il doit être tranché avan
 ## 5. Limites à porter au rapport final
 
 **Le classement sera un classement de rendement, pas de rentabilité.** La commande parle de « la culture la plus rentable ». La rentabilité dépend du prix de vente, des coûts de semences, d'intrants, d'irrigation et de traitement — **aucune de ces données n'a été fournie**. L'application pourra dire quelle culture produit le plus de tonnes à l'hectare ; elle ne pourra pas dire laquelle rapporte le plus. Obtenir des données économiques, même approximatives, changerait la valeur du produit.
+
+> **Suite donnée.** Les étapes 3 et 4 ont levé cette limite, sans que les données manquantes aient été fournies pour autant. Les **prix** viennent d'une source externe — FAOSTAT 2024, prix à la production, médiane et dispersion entre pays déclarants. Les **charges**, elles, restent saisies par l'agriculteur : l'application ne les invente pas. De ces deux éléments elle calcule une **marge brute** — prix × rendement − charges —, qui sépare les cultures là où le rendement ne les sépare pas.
 
 **Deux cultures sur six ne sont pas couvertes par le référentiel.** L'orge et le coton sont absents des données FAO exploitables. Plutôt que de supprimer un tiers des observations, nous les avons conservées en signalant explicitement l'absence de référence. L'application devra indiquer à l'utilisateur que la recommandation est moins documentée pour ces deux cultures.
 
