@@ -229,3 +229,5 @@ Trois comportements de Streamlit ont dû être établis par lecture du code sour
 | Rien ne vérifie automatiquement que l'alias du registre et l'artefact servi concordent | le même contrôle, côté API |
 | Les charges d'exemple n'ont aucune source | des références technico-économiques territorialisées, si le projet quitte le prototype |
 | Région, sol et météo sont sans effet, la culture et les cinq variables dérivées non plus (section 6) | un entraînement sur des relevés réels — c'est la limite dont dépendent toutes les autres |
+
+> **Suite donnée.** L'étape 5 a levé la **deuxième** ligne : un contrôle de dérive compare les deux `requirements.txt` exportés à `uv.lock` à chaque poussée, et fait échouer la chaîne au moindre écart. La **troisième** l'est en partie — l'orchestrateur du pipeline compare l'empreinte des partitions citée par l'artefact servi à celle des fichiers présents, et refuse de réexporter si elles diffèrent. Les deux autres restent ouvertes, la dernière étant celle dont dépend la valeur de tout l'ensemble.

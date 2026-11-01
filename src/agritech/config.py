@@ -348,6 +348,18 @@ PRIX_REFERENCE_FAOSTAT = {
               "pays": 67, "item_faostat": "Wheat"},
 }
 
+#: Noms français des six cultures. Les jeux de données, le modèle et l'API
+#: parlent anglais ; tout ce qui est montré à un agriculteur parle français.
+CULTURES_EN_FRANCAIS = {
+    "Barley": "Orge",
+    "Cotton": "Coton",
+    "Maize": "Maïs",
+    "Rice": "Riz",
+    "Soybean": "Soja",
+    "Wheat": "Blé",
+}
+
+
 # --------------------------------------------------------------------------- #
 # Palette graphique
 # --------------------------------------------------------------------------- #

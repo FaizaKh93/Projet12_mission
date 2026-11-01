@@ -6,9 +6,9 @@
 
 ## 1. Ce qui a été construit
 
-Quatre modèles ont été entraînés sur **999 769 parcelles**, puis départagés sur un jeu de validation qu'aucun d'eux n'avait vu pendant son apprentissage.
+Le jeu consolidé compte 999 769 parcelles, découpées en trois : **699 837** pour l'entraînement, **149 966** pour la validation, autant pour le test. Quatre modèles ont été entraînés sur la première partition, puis départagés sur la deuxième — qu'aucun d'eux n'avait vue pendant son apprentissage.
 
-| Modèle | Rôle | Erreur moyenne |
+| Modèle | Rôle | RMSE sur validation |
 |---|---|---|
 | **Référence naïve** | Prédit toujours le rendement moyen — sert d'étalon | 1,699 t/ha |
 | **Régression linéaire régularisée** | Modèle simple, effets additifs | **0,500 t/ha** |
@@ -28,15 +28,15 @@ La performance annoncée est mesurée sur un troisième jeu de données, **ouver
 | Indicateur | Valeur | Lecture métier |
 |---|---|---|
 | Variation du rendement expliquée | **91,2 %** | Le modèle capte l'essentiel de ce qui fait varier un rendement |
-| Erreur moyenne | **0,40 t/ha** | Soit **8,6 %** du rendement moyen (4,65 t/ha) |
+| Erreur absolue moyenne (MAE) | **0,40 t/ha** | Soit **8,6 %** du rendement moyen (4,65 t/ha) |
 | Erreur en valeur | **80 €/ha** | À 200 €/tonne |
-| Écart validation → test | **+0,0008 t/ha** | Le modèle ne s'est pas sur-ajusté : il tient hors de ses données d'entraînement |
+| Écart validation → test (RMSE) | **+0,0008 t/ha** | Aucune dégradation sur le jeu tenu à l'écart. Calculé sur les valeurs non arrondies |
 
 ![Prédictions comparées aux rendements observés](figures/predictions_vs_reel.png)
 
 *Chaque point est une parcelle. Plus le nuage est serré autour de la diagonale, plus le modèle est juste. L'alignement est net sur toute la plage de rendement, sans zone où le modèle décrocherait.*
 
-Le dernier indicateur est le plus important pour la confiance : un modèle qui excelle sur ses données d'apprentissage et s'effondre sur des données nouvelles est inutilisable. Ici l'écart est de huit dix-millièmes de tonne — **la performance mesurée est celle qu'on obtiendra en production**, sous réserve que les parcelles traitées ressemblent à celles des données.
+Le dernier indicateur est le plus important pour la confiance : un modèle qui excelle sur ses données d'apprentissage et s'effondre sur des données nouvelles est inutilisable. Ici l'écart est de huit dix-millièmes de tonne : **aucune dégradation n'apparaît sur le jeu tenu à l'écart**. Cela ne garantit pas la performance en production. Le test mesure la généralisation à des données issues de la **même distribution simulée** — pas à des parcelles réelles, dont rien n'assure qu'elles lui ressemblent.
 
 ---
 
@@ -62,6 +62,8 @@ Deux lectures s'imposent :
 **Fertilisation et irrigation sont les deux seuls leviers pilotables**, et ils sont du même ordre de grandeur : 300 et 240 €/ha de produit brut. Ce sont des décisions binaires — on fertilise ou non, on irrigue ou non — ce qui les rend directement traduisibles en conseil.
 
 > **Réserve essentielle.** Ces montants sont du **produit brut**, pas du bénéfice. Fertiliser et irriguer coûtent, et **aucune donnée de coût n'a été fournie**. L'arbitrage « est-ce rentable ? » suppose de connaître le prix des intrants et de l'eau. Le modèle dit ce que rapporte l'action ; il ne dit pas ce qu'elle coûte.
+
+> **Suite donnée.** L'application construite aux étapes 3 et 4 demande ces coûts à l'agriculteur plutôt que de les présumer, et en déduit une marge brute. Le modèle dit toujours ce que rapporte l'action ; c'est l'utilisateur qui dit ce qu'elle lui coûte.
 
 ---
 
@@ -123,11 +125,15 @@ La reproductibilité est assurée par des graines aléatoires fixées à chaque 
 
 **Les données sont simulées.** Le modèle retrouve presque exactement la formule qui a servi à les générer : 0,005 par millimètre de pluie, 0,020 par degré, 1,50 pour la fertilisation, 1,20 pour l'irrigation. Une telle régularité ne s'observe jamais sur des parcelles réelles. Le prototype démontre la chaîne complète, de la donnée à l'application — mais **les effets chiffrés ne sont pas des résultats agronomiques transposables**.
 
-**Le plafond de performance est atteint.** Les données contiennent une part d'aléa irréductible, que nous avons mesurée à 0,500 t/ha. Le modèle atteint 0,5013 : il en est à **treize dix-millièmes**. Aucun modèle plus sophistiqué ne fera mieux — la marge restante n'est pas de l'information non exploitée, c'est du bruit.
+**Le plafond de performance est atteint.** Les données contiennent une part d'aléa irréductible, que nous avons mesurée à 0,500 t/ha. Le modèle atteint 0,5013 : il en est à **treize dix-millièmes**. L'essentiel du signal prédictible paraît donc capté, et les gains restants devraient être marginaux dans ce cadre expérimental. Ce n'est pas une impossibilité démontrée, mais ce que cette estimation du bruit suggère.
 
 **Produit brut, pas bénéfice.** Déjà signalé à l'étape 1 et toujours valable : sans données de coût, l'application peut dire ce que rapporte une pratique, pas si elle est rentable. Obtenir ne serait-ce qu'un ordre de grandeur du prix des intrants changerait la valeur du produit.
 
+> **Suite donnée.** Les charges sont désormais saisies par l'utilisateur, et l'application en déduit une marge brute. La limite ne disparaît pas, elle change de main : la qualité du résultat dépend maintenant de la qualité des charges que l'agriculteur renseigne.
+
 **Le modèle n'est pas encore déployable tel quel.** Il attend 13 variables, alors que l'agriculteur n'en saisira que 8 : les 5 autres sont calculées à partir des premières. Tant qu'un module de préparation ne les reconstruit pas automatiquement, l'application ne peut pas interroger le modèle avec les seules saisies de l'utilisateur. **C'est le premier chantier de l'étape suivante.**
+
+> **Suite donnée.** L'étape 3 a construit ce module — `src/agritech/preprocessing.py` — et l'a **gelé avec le modèle dans un même fichier**. La règle qui sert en production est donc, par construction, celle qui a servi à l'apprentissage : les deux ne peuvent pas diverger.
 
 **La prédiction suppose des conditions connues.** Les variables climatiques décrivent une saison **observée**. L'application est un simulateur « si les conditions sont celles-ci, voici le rendement attendu » — elle ne prévoit pas la météo, et ne donne donc pas une prévision avant semis.
 

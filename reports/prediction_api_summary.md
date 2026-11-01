@@ -78,7 +78,7 @@ Chaque classement économique est soumis à un **test de sensibilité au prix** 
 
 ![Rendements indiscernables, marges qui se séparent](figures/api_rendement_vs_marge.png)
 
-*À gauche, les six cultures à conditions de parcelle identiques : six barres indiscernables. À droite, les marges calculées sur deux budgets fournis par l'appelant. Même parcelle, même modèle — c'est l'économie qui départage, pas le rendement. Et les quatre emplacements vides disent ce que l'API refuse de combler.*
+*À gauche, les six cultures à conditions de parcelle identiques : six barres indiscernables. À droite, les marges calculées sur les six budgets de l'exemple documenté du contrat — de 214 à 725 €/ha. Même parcelle, même modèle : c'est l'économie qui départage, pas le rendement. Une culture dont le budget manque n'apparaît pas à droite ; l'API ne lui invente pas de marge.*
 
 ### 3.3 `/reference/prices` — la seule route qui ne calcule rien
 
@@ -213,7 +213,7 @@ Dans tous les cas, le modèle est chargé **une fois au démarrage**, et éprouv
 
 | Caractéristique | Valeur |
 |---|---|
-| Taille de l'image | **666 Mo** |
+| Taille de l'image | **666 Mo** décompressée sur le poste — 146 Mo une fois les couches compressées sur le registre |
 | Démarrage | **moins de 2 s** entre `docker run` et la première réponse de `/health`, sans aucun montage externe |
 | Compte d'exécution | utilisateur non privilégié, pas `root` |
 | Supervision | contrôle de santé intégré, interrogeant `/health` |
@@ -291,3 +291,5 @@ S'y ajoute un **test de fumée du conteneur** de 24 contrôles, organisé en tro
 **Les charges opérationnelles restent à la charge de l'appelant.** C'est la limite signalée depuis l'étape 1, et toujours la plus structurante : sans elles, l'API dit ce que rapporte une pratique, pas si elle est rentable.
 
 **L'étiquette du registre peut dériver** sans que l'image en sache rien. Le contrôle existant est délibérément local ; une vérification de synchronisation au déploiement relèverait de la chaîne d'intégration continue, chantier de l'étape 5.
+
+> **Suite donnée.** L'étape 5 a livré cette chaîne, et elle a tranché autrement : elle **n'interroge pas le registre**. Elle emballe l'artefact versionné, dont l'empreinte est vérifiée au démarrage du conteneur. Le rapprochement se fait en amont, dans l'orchestrateur du pipeline, qui refuse de réexporter tant que l'artefact et les partitions présentes ne décrivent pas le même découpage.

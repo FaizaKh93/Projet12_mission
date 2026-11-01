@@ -83,6 +83,12 @@ ui = [
     # Streamlit change de moteur graphique.
     "altair>=5.5",
 ]
+# Génération des deux rapports PDF. ReportLab est du Python pur : aucune
+# dépendance native, donc rien à installer sur le système. Ni l'image
+# Docker ni les deux `requirements.txt` exportés ne le connaissent.
+report = [
+    "reportlab>=5.1",
+]
 
 [build-system]
 requires = ["uv_build>=0.11.29,<0.12.0"]
@@ -92,7 +98,7 @@ build-backend = "uv_build"
 # `uv sync` sans option installe donc l'environnement de travail complet, API
 # comprise. L'image Docker, elle, n'installe aucun de ces groupes :
 #   uv export --no-default-groups --group api --no-emit-project --no-hashes
-default-groups = ["api", "dev", "notebooks", "ui"]
+default-groups = ["api", "dev", "notebooks", "report", "ui"]
 
 [tool.uv.build-backend]
 # Le paquet s'appelle `agritech`, pas `agritech_answers` deduit du nom du projet

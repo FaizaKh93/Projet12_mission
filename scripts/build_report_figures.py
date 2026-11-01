@@ -48,6 +48,7 @@ from agritech.config import (  # noqa: E402
     PRIX_REFERENCE_SOURCE,
     SEUIL_ECART_RENDEMENT_PERTINENT_T_HA,
 )
+from api.schemas import EXEMPLE_RECOMMANDATION  # noqa: E402
 from api.service import charger_modele  # noqa: E402
 
 DOSSIER = RACINE / "reports" / "figures"
@@ -69,14 +70,12 @@ EN_FRANCAIS = {"Barley": "Orge", "Cotton": "Coton", "Maize": "Maïs",
 PARCELLE = {"rainfall_mm": 650.0, "temperature_celsius": 22.0,
             "fertilizer_used": True, "irrigation_used": True}
 
-#: Hypothèses de démonstration. Le prix vient de FAOSTAT via `config.py` ; le
-#: rendement attendu et les charges sont **fournis par l'agriculteur** dans le
-#: contrat de l'API, et n'ont donc aucune source. Annoncés comme tels sur la
-#: figure.
-BUDGETS_DEMONSTRATION = {
-    "Maize": {"rendement_attendu": 9.0, "charges": 1100.0},
-    "Wheat": {"rendement_attendu": 6.5, "charges": 850.0},
-}
+#: Les six budgets de l'exemple documenté du contrat (`api/schemas.py`),
+#: repris tels quels plutôt que réinventés ici : le dépôt n'a ainsi qu'un
+#: seul jeu de chiffres de démonstration. Les prix sont ceux de FAOSTAT ;
+#: les rendements attendus et les charges sont **fournis par l'agriculteur**
+#: dans le contrat de l'API, et n'ont donc aucune source — la figure le dit.
+BUDGETS_DEMONSTRATION = EXEMPLE_RECOMMANDATION["budgets"]
 
 
 def fr(valeur: float, decimales: int = 0) -> str:
@@ -320,17 +319,22 @@ def figure_rendement_vs_marge(modele) -> None:
     superposer des tonnes et des euros laisserait croire qu'on peut les
     comparer directement.
 
-    **Les deux axes partent de zéro, et les deux panneaux ont six
-    emplacements.** Zoomer à gauche ferait apparaître des écarts
-    spectaculaires là où il n'y en a pas — le piège que ce projet documente
-    depuis l'étape 2. Et les quatre emplacements vides à droite *sont* le
-    message : sans budget, pas de marge.
+    **Les deux axes partent de zéro.** Zoomer à gauche ferait apparaître des
+    écarts spectaculaires là où il n'y en a pas — le piège que ce projet
+    documente depuis l'étape 2.
+
+    Les rendements du panneau droit ne sont pas ceux du panneau gauche, et
+    c'est le contrat de l'API qui le veut : une tonne de coton et une tonne
+    de blé ne se vendent pas au même prix ni au même volume, donc
+    l'agriculteur déclare son propre rendement commercialisable. La légende
+    l'explique au lecteur.
     """
     predits = rendements(modele)
+    # Même formule que `_marge()` dans l'API : prix × rendement − charges.
     marges = {
-        culture: (PRIX_REFERENCE_FAOSTAT[culture]["prix_eur_t"]
-                  * demo["rendement_attendu"] - demo["charges"])
-        for culture, demo in BUDGETS_DEMONSTRATION.items()
+        culture: (budget["price_eur_t"] * budget["expected_yield_t_ha"]
+                  - budget["variable_costs_eur_ha"])
+        for culture, budget in BUDGETS_DEMONSTRATION.items()
     }
     etendue = max(predits.values()) - min(predits.values())
 
@@ -353,37 +357,24 @@ def figure_rendement_vs_marge(modele) -> None:
         gauche.text(predits[culture] + 0.1, index, fr(predits[culture], 2),
                     va="center", fontsize=9.5, color=GRIS)
 
-    # --- Panneau droit : mêmes emplacements, barres seulement si budget --- #
-    budgetees = [c for c in CULTURES if c in marges]
+    # --- Panneau droit : mêmes emplacements, même ordre ------------------ #
     maxi = max(marges.values())
-    droite.barh([CULTURES.index(c) for c in budgetees],
-                [marges[c] for c in budgetees], color=ORANGE, alpha=0.9,
-                height=0.58)
+    droite.barh(positions, [marges[c] for c in CULTURES], color=ORANGE,
+                alpha=0.9, height=0.58)
     droite.set_xlim(0, maxi * 1.32)
     droite.set_xlabel("marge brute simulée (€/ha)", fontsize=10, color=GRIS)
     droite.set_title("Ce sont vos chiffres économiques qui tranchent",
                      fontsize=12.5, fontweight="bold", color="#1a202c",
                      loc="left", pad=12)
-    for culture in budgetees:
-        droite.text(marges[culture] + maxi * 0.015, CULTURES.index(culture),
+    for index, culture in enumerate(CULTURES):
+        droite.text(marges[culture] + maxi * 0.015, index,
                     f"{fr(marges[culture])} €", va="center", fontsize=9.5,
                     color=GRIS)
-
-    # Une case laissée vide se lirait comme une marge nulle. Elle porte donc
-    # son motif, à sa propre hauteur.
-    for culture in CULTURES:
-        if culture not in marges:
-            droite.text(maxi * 0.02, CULTURES.index(culture),
-                        "budget non fourni", va="center", fontsize=9.5,
-                        color=GRIS_CLAIR, style="italic")
 
     for ax in (gauche, droite):
         ax.set_yticks(positions)
         ax.set_yticklabels([EN_FRANCAIS[c] for c in CULTURES], color=GRIS)
         ax.set_ylim(len(CULTURES) - 0.45, -0.55)
-    for index, culture in enumerate(CULTURES):
-        if culture not in marges:
-            droite.get_yticklabels()[index].set_color(GRIS_CLAIR)
 
     for ax in (gauche, droite):
         depouiller(ax)
@@ -401,10 +392,13 @@ def figure_rendement_vs_marge(modele) -> None:
 
     figure.text(
         0.5, -0.17,
+        "À gauche, le rendement que le modèle prédit. À droite, le rendement "
+        "commercialisable que l'agriculteur déclare lui-même, culture par "
+        "culture : une tonne de coton ne se vend ni au prix ni au volume "
+        "d'une tonne de blé.\n"
         "Prix issus de FAOSTAT. Rendements attendus et charges : hypothèses "
-        "de démonstration fournies par l'appelant — aucune source du projet "
-        "ne donne de charges.\n"
-        "La marge la plus élevée n'est pas un avis agronomique : aucune "
+        "de démonstration — aucune source du projet ne donne de charges. La "
+        "marge la plus élevée n'est pas un avis agronomique : aucune "
         "contrainte de sol, de rotation ou de débouché n'est évaluée.",
         ha="center", va="top", fontsize=9, color=GRIS, style="italic")
 
