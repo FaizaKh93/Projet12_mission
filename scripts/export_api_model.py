@@ -69,7 +69,7 @@ from agritech.preprocessing import (
     DerivationVariables,
 )
 from agritech.training import (
-    JEU_PAR_DEFAUT,
+    SOURCE_PAR_DEFAUT,
     charger_partitions,
     configurer_mlflow,
     journaliser_jeux,
@@ -660,14 +660,14 @@ def main():
         if arguments.verifier_seulement or arguments.sample:
             raise SystemExit("--promouvoir ne se combine ni avec "
                              "--verifier-seulement ni avec --sample.")
-        promouvoir(configurer_mlflow(JEU_PAR_DEFAUT))
+        promouvoir(configurer_mlflow(SOURCE_PAR_DEFAUT))
         return
 
     verifier_seulement = arguments.verifier_seulement or bool(arguments.sample)
     if arguments.sample and not arguments.verifier_seulement:
         print("--sample implique --verifier-seulement : rien ne sera publié.\n")
 
-    mlflow = configurer_mlflow(JEU_PAR_DEFAUT)
+    mlflow = configurer_mlflow(SOURCE_PAR_DEFAUT)
     source, version_source = resoudre_source(mlflow)
 
     train, val = charger_partitions(echantillon=arguments.sample)

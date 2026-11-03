@@ -33,8 +33,14 @@ la CI, qui a besoin d'un critère unique.
 
 Exemples :
 
-    # Étude complète : 4 modèles, les 13 variables, 100 essais chacun
+    # Parcelles simulées : 4 modèles, les 13 variables, 100 essais chacun
     uv run python scripts/train.py
+
+    # Panel FAO : ses 8 variables, les deux références comprises
+    uv run python scripts/train.py --source real
+
+    # Les deux chaînes d'affilée
+    uv run python scripts/train.py --source simulated real
 
     # Test d'intégration rapide, sans rien écrire dans MLflow ni sur disque
     uv run python scripts/train.py --sample 5000 --trials 2 --no-mlflow --no-export
@@ -53,11 +59,16 @@ import time
 
 import pandas as pd
 
-from agritech.config import FINAL_MODEL_PATH, MODELS_DIR, OPTUNA_N_TRIALS
+from agritech.config import (
+    FINAL_MODEL_PATH,
+    MODELS_DIR,
+    OPTUNA_N_TRIALS,
+    PANEL_FINAL_MODEL_PATH,
+)
 from agritech.training import (
     ESTIMATEURS,
-    JEU_PAR_DEFAUT,
     JEUX_DE_VARIABLES,
+    SOURCE_PAR_DEFAUT,
     charger_partitions,
     chemin_modele,
     exporter_joblib,
@@ -76,13 +87,16 @@ def analyser_arguments():
         description="Entraîne et optimise les modèles de prédiction de rendement.")
 
     parseur.add_argument(
-        "--models", nargs="+", default=list(ESTIMATEURS), choices=list(ESTIMATEURS),
-        help="modèles à étudier (défaut : tous)")
+        "--models", nargs="+", default=None, choices=list(ESTIMATEURS),
+        help="modèles à étudier (défaut : les quatre, la référence `dummy` "
+             "comprise)")
     parseur.add_argument(
-        "--features", nargs="+", default=[JEU_PAR_DEFAUT],
+        "--source", nargs="+", default=[SOURCE_PAR_DEFAUT],
         choices=list(JEUX_DE_VARIABLES),
-        help=f"jeu de variables (défaut et unique : {JEU_PAR_DEFAUT}, "
-             "les 13 variables explicatives du dataset consolidé)")
+        help=f"chaîne de données à entraîner (défaut : {SOURCE_PAR_DEFAUT}, les "
+             "13 variables des parcelles simulées). `real` entraîne les 8 "
+             "variables du panel FAO. Le même mot qu'attendent "
+             "`prepare_data.py` et `split_data.py`")
     parseur.add_argument(
         "--trials", type=int, default=OPTUNA_N_TRIALS,
         help=f"essais Optuna par étude (défaut : {OPTUNA_N_TRIALS})")
@@ -98,7 +112,9 @@ def analyser_arguments():
         help=f"n'écrit aucun .joblib dans {MODELS_DIR.name}/ (export actif par défaut)")
     parseur.add_argument(
         "--export-best", action="store_true",
-        help=f"désigne en plus le meilleur RMSE comme {FINAL_MODEL_PATH.name}")
+        help="désigne en plus le meilleur RMSE comme modèle final de sa "
+             f"chaîne ({FINAL_MODEL_PATH.name} pour les parcelles simulées, "
+             f"{PANEL_FINAL_MODEL_PATH.name} pour le panel)")
 
     return parseur.parse_args()
 
@@ -108,35 +124,39 @@ def main():
     suivi_mlflow = not arguments.no_mlflow
     exporter = not arguments.no_export
 
-    # Les partitions sont lues une seule fois et réutilisées par toutes les
-    # études : relire 700 000 lignes à chaque modèle serait du gaspillage.
-    train, val = charger_partitions(echantillon=arguments.sample)
-    print(f"train : {len(train):,} lignes | val : {len(val):,} lignes")
     print(f"MLflow : {'actif' if suivi_mlflow else 'DÉSACTIVÉ'} | "
           f"export : {'actif' if exporter else 'DÉSACTIVÉ'} | "
           f"{arguments.trials} essais par étude\n")
 
-    # Une étude par couple (jeu de variables, modèle)
+    # Une étude par couple (chaîne, modèle). Les partitions ne sont lues qu'une
+    # fois par chaîne : relire 700 000 lignes à chaque modèle serait du
+    # gaspillage.
     resultats = []
-    for jeu in arguments.features:
-        for modele in arguments.models:
+    for source in arguments.source:
+        train, val = charger_partitions(echantillon=arguments.sample,
+                                        source=source)
+        print(f"chaîne {source} : train {len(train):,} lignes | "
+              f"val {len(val):,} lignes | "
+              f"{len(JEUX_DE_VARIABLES[source].features)} variables")
+
+        for modele in arguments.models or list(ESTIMATEURS):
             debut = time.perf_counter()
             # `optimiser` renvoie aussi le Pipeline du meilleur essai, déjà
             # réajusté : on n'a donc jamais à le refaire pour l'exporter.
-            etude, pipeline = optimiser(modele, jeu, train, val,
+            etude, pipeline = optimiser(modele, source, train, val,
                                         n_essais=arguments.trials,
                                         suivi_mlflow=suivi_mlflow)
             duree = time.perf_counter() - debut
 
             resultats.append({
-                "jeu_de_variables": jeu,
+                "source": source,
                 "modele": modele,
                 "val_rmse": etude.best_value,
                 "essais": len(etude.trials),
                 "duree_s": round(duree, 1),
                 "pipeline": pipeline,   # gardé pour l'export, retiré de l'affichage
             })
-            print(f"{jeu:<9} {modele:<9} RMSE {etude.best_value:.4f}  "
+            print(f"{source:<10} {modele:<11} RMSE {etude.best_value:.4f}  "
                   f"({len(etude.trials)} essais, {duree:.0f} s)")
 
     print("\n=== Récapitulatif, trié par RMSE sur val ===")
@@ -150,16 +170,21 @@ def main():
 
 
 def exporter_tous(resultats: list[dict]):
-    """Écrit un `.joblib` par étude, nommé `{modele}_{jeu}.joblib`.
+    """Écrit un `.joblib` par étude : `ridge_modele.joblib` pour les parcelles
+    simulées, `ridge_panel_modele.joblib` pour le panel FAO.
 
-    C'est ce qui permet au notebook de comparaison de recharger les huit
-    modèles optimisés instantanément, plutôt que de les réajuster à chaque
-    exécution — soit plusieurs minutes économisées par figure.
+    C'est ce qui permet au notebook de comparaison de recharger les modèles
+    optimisés instantanément, plutôt que de les réajuster à chaque exécution —
+    soit plusieurs minutes économisées par figure.
+
+    Le nom du fichier vient de `artefact`, pas de la source : les deux chaînes
+    cohabitent dans `models/` sans qu'un fichier puisse en écraser un autre.
     """
     print(f"\n=== Modèles exportés dans {MODELS_DIR.name}/ ===")
     for resultat in resultats:
+        artefact = JEUX_DE_VARIABLES[resultat["source"]].artefact
         exporter_joblib(resultat["pipeline"],
-                        chemin_modele(resultat["modele"], resultat["jeu_de_variables"]))
+                        chemin_modele(resultat["modele"], artefact))
 
 
 def designer_modele_final(resultats: list[dict]):
@@ -169,17 +194,30 @@ def designer_modele_final(resultats: list[dict]):
     plus. Le vrai choix est multicritère et appartient au notebook. Cette
     option existe pour la CI, qui doit trancher sans intervention humaine.
 
-    `dummy` est écarté : il ne prédit que la moyenne.
+    La référence est écartée : `dummy` ne prédit que la moyenne, il n'a rien
+    appris.
     """
     candidats = [r for r in resultats if r["modele"] != "dummy"]
     if not candidats:
-        print("\nAucun modèle à désigner (seul dummy a été entraîné).")
+        print("\nAucun modèle à désigner (seule la référence a tourné).")
+        return
+
+    # Un RMSE de parcelle et un RMSE national ne se comparent pas : l'un porte
+    # sur des hectares simulés autour de 4,65 t/ha, l'autre sur des moyennes
+    # nationales de 1,5 à 18 t/ha. Le minimum des deux ne désignerait rien.
+    chaines = {r["source"] for r in candidats}
+    if len(chaines) > 1:
+        print(f"\nAucun modèle désigné : l'exécution couvre {len(chaines)} "
+              f"chaînes de données ({', '.join(sorted(chaines))}), dont les "
+              "RMSE ne sont pas comparables. Relancer `--export-best` sur une "
+              "seule chaîne.")
         return
 
     meilleur = min(candidats, key=lambda r: r["val_rmse"])
+    destination = JEUX_DE_VARIABLES[meilleur["source"]].modele_final
     print(f"\n=== Modèle final (RMSE seul) : {meilleur['modele']} / "
-          f"{meilleur['jeu_de_variables']} — RMSE {meilleur['val_rmse']:.4f} ===")
-    exporter_joblib(meilleur["pipeline"], FINAL_MODEL_PATH)
+          f"{meilleur['source']} — RMSE {meilleur['val_rmse']:.4f} ===")
+    exporter_joblib(meilleur["pipeline"], destination)
 
 
 if __name__ == "__main__":
