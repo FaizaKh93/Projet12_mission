@@ -26,7 +26,16 @@ import pandas as pd
 import pytest
 
 from agritech import decoupage, pipeline, preparation
-from agritech.config import FEATURES_MODELE, SPLIT_PROPORTIONS, TARGET
+from agritech.config import (
+    FEATURES_MODELE,
+    PANEL_COLUMNS,
+    PANEL_FEATURES,
+    PANEL_FEATURES_PREVISION,
+    PANEL_KEYS,
+    PANEL_TARGET,
+    SPLIT_PROPORTIONS,
+    TARGET,
+)
 
 # --------------------------------------------------------------------------- #
 # Sources synthétiques, fidèles au schéma des six fichiers
@@ -890,3 +899,278 @@ def test_un_script_en_echec_arrete_la_chaine(chaine, tmp_path):
 
     with pytest.raises(RuntimeError, match="code 3"):
         pipeline.lancer_entrainement()
+
+
+# --------------------------------------------------------------------------- #
+# Chaîne `real` : le panel FAO et ses quatre variables dérivées
+#
+# Les règles éprouvées ici sont celles que §4.3 du notebook de préparation a
+# établies par la mesure : un retard se décale par année et non par position,
+# et le choc d'une ligne ne contient jamais son propre rendement.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(scope="module")
+def panel_fao(sources) -> pd.DataFrame:
+    """Le panel brut, avant dérivation."""
+    return preparation.construire_panel(
+        preparation.nettoyer_rendements(sources.fao),
+        preparation.agreger_temperatures(sources.temperatures),
+        preparation.nettoyer_pluie(sources.pluie),
+        preparation.nettoyer_pesticides(sources.pesticides),
+    )
+
+
+def test_le_dataset_du_panel_porte_onze_colonnes(sources):
+    """Trois clés, quatre variables, trois covariables, une cible — sans encodage."""
+    dataset = preparation.preparer_panel(sources)
+    assert list(dataset.columns) == PANEL_COLUMNS
+    assert len(dataset.columns) == 11
+
+
+def test_un_trou_dans_la_serie_invalide_le_retard(panel_fao):
+    """Décalé par position, `shift` ferait passer 2005 pour l'année d'avant 2007."""
+    troue = panel_fao[panel_fao["Year"] != 2006]
+    derive = preparation.construire_variables_panel(troue)
+    apres_le_trou = derive[(derive["Year"] == 2007)]
+    assert apres_le_trou["lag1"].isna().all()
+    # l'année suivante retrouve un passé continu
+    assert derive[derive["Year"] == 2008]["lag1"].notna().any()
+
+
+def test_le_choc_ignore_le_rendement_de_sa_propre_ligne(panel_fao):
+    """La preuve de non-fuite : on triple la cible, le choc ne bouge pas."""
+    avant = preparation.construire_variables_panel(panel_fao)
+
+    # UNE seule année : tripler la série entière laisserait `var_rel` invariant,
+    # puisque le numérateur et le dénominateur seraient multipliés ensemble.
+    annee = ANNEES[len(ANNEES) // 2]
+    perturbe = panel_fao.copy()
+    cible = ((perturbe["Area"] == PAYS[0]) & (perturbe["Item"] == ITEMS[0])
+             & (perturbe["Year"] == annee))
+    perturbe.loc[cible, "yield_t_ha"] *= 3
+    apres = preparation.construire_variables_panel(perturbe)
+
+    meme_ligne = ((apres["Area"] == PAYS[0]) & (apres["Item"] == ITEMS[0])
+                  & (apres["Year"] == annee))
+    ecart = (apres.loc[meme_ligne, "choc"] - avant.loc[meme_ligne, "choc"]).abs().max()
+    assert ecart < 1e-12, "le choc d'une ligne dépend de sa propre cible"
+
+    # Contrôle positif : le test doit savoir détecter une dépendance. Les autres
+    # cultures du même pays, la même année, voient bien leur choc se déplacer.
+    voisines = ((apres["Area"] == PAYS[0]) & (apres["Item"] != ITEMS[0])
+                & (apres["Year"] == annee))
+    assert (apres.loc[voisines, "choc"] - avant.loc[voisines, "choc"]).abs().max() > 1e-9
+
+
+def test_le_choc_est_la_moyenne_des_autres_cultures(panel_fao):
+    """Laissant-un-dehors : la ligne sort du numérateur et du dénominateur."""
+    derive = preparation.construire_variables_panel(panel_fao)
+    derive = derive.assign(
+        var_rel=(derive[PANEL_TARGET] - derive["lag1"]) / derive["lag1"])
+    ligne = derive[derive["choc"].notna()].iloc[5]
+    autres = derive[
+        (derive["Area"] == ligne["Area"])
+        & (derive["Year"] == ligne["Year"])
+        & (derive["Item"] != ligne["Item"])
+    ]
+    assert ligne["choc"] == pytest.approx(autres["var_rel"].mean())
+
+
+def test_une_ligne_sans_choc_reste_dans_le_dataset():
+    """Le modèle de prévision n'utilise pas `choc` : l'exiger coûterait des lignes.
+
+    La règle est éprouvée directement : le panel synthétique n'a aucun choc
+    manquant, puisque chaque pays-année y déclare ses quatre cultures.
+    """
+    variables = pd.DataFrame({
+        "Area": ["France"] * 3, "Item": ["Maize"] * 3, "Year": [2001, 2002, 2003],
+        "lag1": [1.0, 1.1, 1.2], "lag2": [0.9, 1.0, 1.1], "lag3": [0.8, 0.9, 1.0],
+        "choc": [0.1, np.nan, 0.2], "yield_t_ha": [1.1, 1.2, 1.3],
+    })
+    garde = preparation.reduire_au_dataset_panel(variables)
+    assert len(garde) == 3, "une ligne a été écartée à cause de `choc`"
+
+    sans_retard = variables.assign(lag3=[0.8, np.nan, 1.0])
+    assert len(preparation.reduire_au_dataset_panel(sans_retard)) == 2
+
+
+def test_le_decoupage_chronologique_ne_melange_aucune_annee(sources, monkeypatch):
+    """Une année dans deux partitions ferait fuiter l'entraînement vers le test.
+
+    Les bornes sont ramenées à la plage du panel synthétique : ce qui est
+    éprouvé est la règle de découpage, pas la valeur des constantes.
+    """
+    monkeypatch.setattr(
+        decoupage, "PANEL_SPLIT_BOUNDS", {"fin_train": 2005, "fin_val": 2007})
+    dataset = preparation.preparer_panel(sources)
+    partitions = decoupage.decouper_chronologiquement(dataset)
+    annees = {nom: set(p["Year"]) for nom, p in partitions.items()}
+    assert not annees["train"] & annees["val"]
+    assert not annees["val"] & annees["test"]
+    assert not annees["train"] & annees["test"]
+    assert max(annees["train"]) < min(annees["val"])
+    assert max(annees["val"]) < min(annees["test"])
+
+
+def test_le_decoupage_chronologique_conserve_toutes_les_lignes(sources):
+    dataset = preparation.preparer_panel(sources)
+    partitions = decoupage.decouper_chronologiquement(dataset)
+    assert sum(len(p) for p in partitions.values()) == len(dataset)
+
+
+def test_le_dictionnaire_du_panel_couvre_toutes_les_colonnes(sources):
+    """Un dataset dont `choc` n'est pas documenté serait un piège."""
+    dataset = preparation.preparer_panel(sources)
+    dictionnaire = preparation.dictionnaire_du_panel()
+    assert set(dataset.columns) == set(dictionnaire.index)
+    assert "nowcasting" in dictionnaire.loc["choc", "admissible_entraînement"]
+
+
+def test_sans_source_et_sans_terminal_le_script_refuse(monkeypatch):
+    """En CI, `input()` lirait une fin de fichier : on échoue avec un message."""
+    monkeypatch.setattr(pipeline.sys.stdin, "isatty", lambda: False)
+    with pytest.raises(SystemExit) as refus:
+        pipeline.resoudre_source(None)
+    assert "--source" in str(refus.value)
+
+
+def test_une_source_explicite_court_circuite_la_question():
+    assert pipeline.resoudre_source("real") == "real"
+
+
+# --------------------------------------------------------------------------- #
+# Orchestration de la chaîne `real`
+#
+# Même garde-fou que la V1 : on ne réécrit jamais un livrable existant sans
+# avoir vérifié qu'on reproduit le même contenu. Ces tests éprouvent le refus,
+# pas seulement le chemin heureux.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def chaine_panel(monkeypatch, tmp_path, sources):
+    """La chaîne `real`, isolée : chemins du panel et bornes de découpage."""
+    processed, interim = tmp_path / "processed", tmp_path / "interim"
+    splits = processed / "splits_real"
+    chemins = {
+        "PANEL_DATASET_PATH": processed / "fao_panel_dataset.csv",
+        "PANEL_DATASET_PARQUET_PATH": processed / "fao_panel_dataset.parquet",
+        "PANEL_DICTIONARY_PATH": interim / "fao_panel_dictionary.csv",
+    }
+    for nom, valeur in chemins.items():
+        monkeypatch.setattr(pipeline, nom, valeur)
+
+    partitions = {
+        "train": splits / "train.parquet",
+        "val": splits / "val.parquet",
+        "test": splits / "test.parquet",
+    }
+    metadata = splits / "split_metadata.json"
+    monkeypatch.setattr(
+        decoupage, "PANEL_DATASET_PARQUET_PATH", chemins["PANEL_DATASET_PARQUET_PATH"])
+    monkeypatch.setattr(decoupage, "PANEL_SPLITS_DIR", splits)
+    monkeypatch.setattr(decoupage, "PANEL_SPLIT_METADATA_PATH", metadata)
+    monkeypatch.setattr(decoupage, "CHEMINS_PANEL", partitions)
+    monkeypatch.setattr(decoupage, "ARTEFACTS_PANEL", {**partitions, "metadata": metadata})
+    # Les bornes de production ne couvrent pas la plage du panel synthétique.
+    monkeypatch.setattr(
+        decoupage, "PANEL_SPLIT_BOUNDS", {"fin_train": 2005, "fin_val": 2007})
+    monkeypatch.setattr(preparation, "charger_sources", lambda: sources)
+    return {**chemins, **partitions, "metadata": metadata}
+
+
+def test_sans_livrable_la_chaine_real_le_construit(chaine_panel):
+    resultat = pipeline.lancer_preparation_panel()
+    assert resultat.agi
+    for cle in ("PANEL_DATASET_PATH", "PANEL_DATASET_PARQUET_PATH", "PANEL_DICTIONARY_PATH"):
+        assert chaine_panel[cle].exists(), cle
+
+
+def test_un_dataset_real_a_jour_n_est_pas_reecrit(chaine_panel):
+    pipeline.lancer_preparation_panel()
+    empreinte = chaine_panel["PANEL_DATASET_PARQUET_PATH"].read_bytes()
+
+    resultat = pipeline.lancer_preparation_panel()
+    assert not resultat.agi
+    assert "vérifié" in resultat.detail
+    assert chaine_panel["PANEL_DATASET_PARQUET_PATH"].read_bytes() == empreinte
+
+
+def test_un_dataset_real_different_bloque_l_ecriture(chaine_panel, monkeypatch):
+    """Écraser périmerait les runs MLflow : on refuse et on explique."""
+    pipeline.lancer_preparation_panel()
+    tronque = pd.read_parquet(chaine_panel["PANEL_DATASET_PARQUET_PATH"]).head(5)
+    monkeypatch.setattr(preparation, "preparer_panel", lambda *a, **k: tronque)
+
+    with pytest.raises(RuntimeError, match="diffère"):
+        pipeline.lancer_preparation_panel()
+
+
+def test_forcer_reecrit_un_dataset_real_different(chaine_panel, monkeypatch):
+    pipeline.lancer_preparation_panel()
+    tronque = pd.read_parquet(chaine_panel["PANEL_DATASET_PARQUET_PATH"]).head(5)
+    monkeypatch.setattr(preparation, "preparer_panel", lambda *a, **k: tronque)
+
+    resultat = pipeline.lancer_preparation_panel(forcer=True)
+    assert resultat.agi
+    assert len(pd.read_parquet(chaine_panel["PANEL_DATASET_PARQUET_PATH"])) == 5
+
+
+def test_un_livrable_real_partiel_est_refuse(chaine_panel):
+    """Un lot incomplet est le vestige d'une exécution interrompue."""
+    pipeline.lancer_preparation_panel()
+    chaine_panel["PANEL_DICTIONARY_PATH"].unlink()
+
+    with pytest.raises(RuntimeError, match="PARTIEL"):
+        pipeline.lancer_preparation_panel()
+
+
+def test_sans_dataset_real_l_etape_n_est_pas_a_jour(chaine_panel):
+    a_jour, motif = pipeline.etat_preparation_panel()
+    assert not a_jour
+    assert motif == "aucun livrable"
+
+
+def test_le_decoupage_real_ecrit_ses_quatre_artefacts(chaine_panel):
+    pipeline.lancer_preparation_panel()
+    resultat = pipeline.lancer_decoupage_panel()
+
+    assert resultat.agi
+    for cle in ("train", "val", "test", "metadata"):
+        assert chaine_panel[cle].exists(), cle
+
+
+def test_les_metadonnees_real_portent_les_bornes_et_la_cible(chaine_panel):
+    """Sans elles, impossible de savoir sur quelle période un modèle a été évalué."""
+    pipeline.lancer_preparation_panel()
+    pipeline.lancer_decoupage_panel()
+    metadonnees = json.loads(chaine_panel["metadata"].read_text(encoding="utf-8"))
+
+    assert metadonnees["strategie"] == "chronologique"
+    assert metadonnees["cible"] == PANEL_TARGET
+    assert metadonnees["features_prevision"] == PANEL_FEATURES_PREVISION
+    assert "choc" in metadonnees["features_nowcast"]
+    assert metadonnees["bornes"] == {"fin_train": 2005, "fin_val": 2007}
+    assert sum(metadonnees["effectifs"].values()) > 0
+
+
+def test_un_decoupage_real_a_jour_n_est_pas_refait(chaine_panel):
+    pipeline.lancer_preparation_panel()
+    premier = pipeline.lancer_decoupage_panel()
+
+    second = pipeline.lancer_decoupage_panel()
+    assert not second.agi
+    assert "à jour" in second.detail
+    assert premier.bilan is not None
+
+
+def test_des_partitions_real_perimees_sont_refusees(chaine_panel):
+    """Les partitions décrivent un autre dataset : on refuse plutôt que deviner."""
+    pipeline.lancer_preparation_panel()
+    pipeline.lancer_decoupage_panel()
+    chaine_panel["metadata"].write_text(
+        json.dumps({"data_version": "autre", "split_version": "x"}), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="ne correspondent plus"):
+        pipeline.lancer_decoupage_panel()

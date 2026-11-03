@@ -305,11 +305,12 @@ class QualiteDonnees(BaseModel):
     des données simulées comme des résultats agronomiques.
     """
 
-    training_data: Literal["simulated"] = Field(
+    training_data: Literal["simulated", "real"] = Field(
         "simulated",
-        description="Les données d'entraînement sont simulées. Les effets "
-                    "chiffrés ne sont pas transposables à des parcelles "
-                    "réelles.")
+        description="'simulated' : parcelles du jeu A, effets chiffrés non "
+                    "transposables à des parcelles réelles. 'real' : panel "
+                    "FAO, rendements nationaux annuels — un autre objet, qui "
+                    "ne répond pas à la même question.")
     data_version: str
     split_version: str
     economic_assumptions_version: str | None = Field(

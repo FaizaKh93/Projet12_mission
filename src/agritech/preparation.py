@@ -31,6 +31,11 @@ from agritech.config import (
     CROP_YIELD_PATH,
     CROPS_WITHOUT_REFERENCE,
     HG_PER_HA_TO_T_PER_HA,
+    PANEL_COLUMNS,
+    PANEL_FEATURES,
+    PANEL_FEATURES_PREVISION,
+    PANEL_KEYS,
+    PANEL_TARGET,
     PESTICIDES_PATH,
     RAINFALL_PATH,
     SEUIL_FAIBLE_PLUIE_MM,
@@ -245,6 +250,57 @@ def construire_panel(
     return panel
 
 
+def construire_variables_panel(panel: pd.DataFrame) -> pd.DataFrame:
+    """Les quatre variables dérivées du panel FAO, et rien d'autre.
+
+    Trois retards du rendement et le choc partagé : le jeu que l'élimination
+    descendante retient sur seize variables construites (§4.3 du notebook de
+    préparation). `roll3` et `moy_hist` en sont absentes à dessein — la
+    première est une combinaison **linéaire exacte** des trois retards, la
+    seconde dégrade la prédiction en retardant sur le niveau courant.
+
+    **Le retard est décalé par ANNÉE, pas par position.** Dans une série
+    trouée, `shift(k)` renverrait une valeur vieille de plusieurs années en la
+    présentant comme récente : on l'invalide dès que l'écart constaté n'est pas
+    l'écart demandé. Cinquante lignes du panel sont concernées.
+
+    `choc` est la variation relative moyenne des **autres** cultures du même
+    pays la même année, en laissant-un-dehors : la ligne est soustraite au
+    numérateur *et* au dénominateur. Son propre rendement n'entre donc jamais
+    dans son choc — vérifié en triplant la cible, qui ne le déplace pas d'un
+    zéro machine.
+    """
+    derive = panel.sort_values(PANEL_KEYS).reset_index(drop=True)
+    series = derive.groupby(["Area", "Item"], sort=False)
+
+    for k in (1, 2, 3):
+        valeurs = series[PANEL_TARGET].shift(k)
+        derive[f"lag{k}"] = valeurs.where(derive["Year"] - series["Year"].shift(k) == k)
+
+    derive["_var_rel"] = (derive[PANEL_TARGET] - derive["lag1"]) / derive["lag1"]
+    bloc = derive.groupby(["Area", "Year"])["_var_rel"]
+    derive["choc"] = (bloc.transform("sum") - derive["_var_rel"].fillna(0)) / (
+        bloc.transform("count") - derive["_var_rel"].notna()
+    ).replace(0, np.nan)
+
+    # Les trois covariables suivent, telles quelles et avec leurs absences.
+    # Elles ne sont pas des variables du modèle — §4.3 a mesuré qu'elles
+    # n'apportent rien une fois les retards présents — mais les retirer du
+    # fichier figerait un choix de modélisation dans la préparation.
+    return derive[PANEL_COLUMNS]
+
+
+def reduire_au_dataset_panel(variables: pd.DataFrame) -> pd.DataFrame:
+    """Écarte les lignes sans historique exploitable.
+
+    Les trois retards sont exigés — 93 % du panel subsiste. `choc` ne l'est
+    **pas** : le modèle de prévision ne l'utilise pas, et retirer 307 lignes à
+    cause d'une variable dont il n'a pas besoin serait une perte sèche.
+    """
+    requis = PANEL_FEATURES_PREVISION + [PANEL_TARGET]
+    return variables.dropna(subset=requis).reset_index(drop=True)
+
+
 def construire_reference(panel: pd.DataFrame) -> pd.DataFrame:
     """Une ligne par culture : productivité, dispersion, tendance, climat.
 
@@ -367,6 +423,42 @@ def dictionnaire_des_variables() -> pd.DataFrame:
     ).set_index("colonne")
 
 
+#: Le dictionnaire de la chaîne `real`. La colonne `admissible_entraînement`
+#: y porte trois valeurs et non deux : `choc` n'est ni admissible ni exclu,
+#: il l'est **sous condition** — d'où la mention explicite du nowcasting.
+DICTIONNAIRE_PANEL = [
+    ("Area", "fao_panel.csv", "—", "Pays déclarant, clé du panel", "non — clé"),
+    ("Item", "fao_panel.csv", "—", "Culture, clé du panel", "non — clé"),
+    ("Year", "fao_panel.csv", "année", "Année de récolte, clé du panel", "non — clé"),
+    ("lag1", "dérivée", "t/ha", "Rendement de la même série un an plus tôt", "oui"),
+    ("lag2", "dérivée", "t/ha", "Rendement deux ans plus tôt", "oui"),
+    ("lag3", "dérivée", "t/ha", "Rendement trois ans plus tôt", "oui"),
+    ("choc", "dérivée", "sans unité",
+     "Variation relative moyenne des AUTRES cultures du pays la même année, "
+     "en laissant-un-dehors",
+     "nowcasting seulement — exige l'année courante"),
+    ("avg_temp", "temp.csv", "°C",
+     "Température moyenne annuelle du pays — renseignée sur 57 % des lignes",
+     "non — aucun apport mesuré (§4.3)"),
+    ("rain_mm", "rainfall.csv", "mm",
+     "Pluviométrie annuelle du pays — constante pour 159 pays sur 161, "
+     "renseignée sur 47 % des lignes",
+     "non — aucune variance intra-pays"),
+    ("pesticides_t", "pesticides.csv", "tonnes",
+     "Tonnage national de pesticides, tous usages — renseigné sur 45 % des lignes",
+     "non — aucun apport mesuré (§4.3)"),
+    ("yield_t_ha", "fao_panel.csv", "t/ha", "Rendement national annuel, cible", "cible"),
+]
+
+
+def dictionnaire_du_panel() -> pd.DataFrame:
+    """Le dictionnaire du dataset `real`, indexé par nom de colonne."""
+    return pd.DataFrame(
+        DICTIONNAIRE_PANEL,
+        columns=["colonne", "provenance", "unité", "signification", "admissible_entraînement"],
+    ).set_index("colonne")
+
+
 # --------------------------------------------------------------------------- #
 # Chaîne complète
 # --------------------------------------------------------------------------- #
@@ -396,6 +488,37 @@ def preparer(sources: Sources | None = None) -> Preparation:
         reference=reference,
         dictionnaire=dictionnaire_des_variables(),
     )
+
+
+def preparer_panel(sources: Sources | None = None) -> pd.DataFrame:
+    """La chaîne `real` : des CSV FAO au dataset du panel, huit colonnes.
+
+    Trois clés, quatre variables, une cible — et **aucun encodage
+    catégoriel**. Mesuré, `Area` et `Item` en one-hot dégradent la MAE de
+    0,6708 à 0,6890 : l'effet fixe pays × culture est déjà porté par `lag1`.
+    Les clés restent dans le fichier pour le découpage et la traçabilité, pas
+    pour être apprises.
+    """
+    sources = sources or charger_sources()
+    panel = construire_panel(
+        nettoyer_rendements(sources.fao),
+        agreger_temperatures(sources.temperatures),
+        nettoyer_pluie(sources.pluie),
+        nettoyer_pesticides(sources.pesticides),
+    )
+    return reduire_au_dataset_panel(construire_variables_panel(panel))
+
+
+def controler_panel(dataset: pd.DataFrame) -> dict:
+    """Les chiffres du dataset `real`, et ce qu'ils doivent valoir."""
+    return {
+        "lignes": len(dataset),
+        "colonnes": dataset.shape[1],
+        "pays": int(dataset["Area"].nunique()),
+        "cultures": int(dataset["Item"].nunique()),
+        "annees": f"{int(dataset['Year'].min())}-{int(dataset['Year'].max())}",
+        "choc_manquant": int(dataset["choc"].isna().sum()),
+    }
 
 
 def controler(preparation: Preparation) -> dict:
