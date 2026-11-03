@@ -230,6 +230,46 @@ PANEL_COLUMNS = PANEL_KEYS + PANEL_FEATURES + PANEL_COVARIATES + [PANEL_TARGET]
 PANEL_SPLIT_BOUNDS = {"fin_train": 2002, "fin_val": 2009}
 
 # --------------------------------------------------------------------------- #
+# Variables du modèle de panel
+#
+# `PANEL_FEATURES` ci-dessus porte la conclusion de la **préparation** : les
+# retards suffisent, l'identité du pays et de la culture n'ajoute rien. Les
+# jeux ci-dessous existent parce que l'étape 2 doit *mesurer* cette conclusion
+# plutôt que l'hériter — elle a été établie sur un modèle, sur la seule MAE, et
+# sans optimisation des hyperparamètres.
+#
+# Ils existent aussi parce qu'un modèle de service n'est pas jugé que sur son
+# erreur. L'application doit classer les cultures d'un pays, et ses entrées
+# sont celles que l'agriculteur peut fournir. Ce que chaque bloc de variables
+# coûte ou rapporte dans ce contexte est le sujet de la comparaison, pas un
+# acquis.
+# --------------------------------------------------------------------------- #
+
+#: Clés promues en variables. Ce sont les deux colonnes qui portent l'identité
+#: de la série : `Item` est indispensable à tout classement de cultures — sans
+#: elle le modèle est aveugle à la culture et répond la même chose aux dix —
+#: et `Area` porte l'effet fixe pays que les retards ne captent qu'en partie.
+PANEL_FEATURES_IDENTITE = ["Area", "Item"]
+
+#: **Tout le dataset**, hors `Year` et hors `choc`. Huit variables : l'identité
+#: de la série, les trois retards, les trois covariables.
+#:
+#: Pourquoi `Year` n'y est pas, alors qu'elle est dans le fichier. Le découpage
+#: est chronologique : `val` (2003-2009) et `test` (2010-2016) sont des années
+#: qu'aucun modèle n'a vues. Un arbre les plafonnerait à 2002 — biais
+#: systématique vers le bas, les rendements croissant — et Ridge extrapolerait
+#: une tendance linéaire sur quatorze ans sans aucun garde-fou. La tendance est
+#: portée par les retards, c'est leur rôle.
+#:
+#: Pourquoi `choc` n'y est pas : il exige les rendements de l'**année
+#: courante** des autres cultures du pays, inconnus avant la récolte. Un modèle
+#: qui s'en sert ne peut rien prévoir. Ce qu'il apporterait est mesuré par
+#: ablation dans le notebook, sans qu'un second entraînement soit nécessaire.
+PANEL_FEATURES_MODELE = (
+    PANEL_FEATURES_IDENTITE + PANEL_FEATURES_PREVISION + PANEL_COVARIATES
+)
+
+# --------------------------------------------------------------------------- #
 # Suivi d'expériences et artefacts de modèle
 # --------------------------------------------------------------------------- #
 
@@ -260,6 +300,15 @@ REGISTERED_MODEL_NAME = "agritech-rendement"
 # l'artefact servi par l'API de l'autre.
 REGISTERED_MODEL_API = "agritech-rendement-api"
 
+# La chaîne `real` a sa propre expérience et son propre nom au registre, pour
+# la même raison que ci-dessus : ses versions attendent les colonnes du panel
+# FAO, qui n'ont aucune intersection avec celles du dataset consolidé. Mêlées
+# aux précédentes sous un seul nom, elles donneraient un registre dont les
+# versions ne sont pas interchangeables, et une interface MLflow où un tri par
+# RMSE comparerait des rendements de parcelle à des rendements nationaux.
+EXPERIMENT_PANEL = "agritech-rendement-panel"
+REGISTERED_MODEL_PANEL = "agritech-rendement-panel"
+
 # MLflow 3 a supprimé les *stages* (`Staging`, `Production`) au profit des
 # **alias**. Déplacer un alias suffit à changer ce qu'il désigne, sans toucher
 # au code qui le charge ni redéployer quoi que ce soit.
@@ -267,6 +316,11 @@ ALIAS_CHAMPION = "champion"
 
 MODELS_DIR = PROJECT_ROOT / "models"
 FINAL_MODEL_PATH = MODELS_DIR / "modele_final.joblib"
+
+# Le modèle retenu de la chaîne `real`. Fichier distinct du précédent : les
+# deux n'attendent pas les mêmes colonnes, et rien ne doit pouvoir servir l'un
+# en croyant charger l'autre.
+PANEL_FINAL_MODEL_PATH = MODELS_DIR / "modele_final_panel.joblib"
 
 # Artefact déployé : le Pipeline de service, gelé, dans un fichier autonome.
 # C'est lui que l'image Docker embarque. Le conteneur ne consulte pas le

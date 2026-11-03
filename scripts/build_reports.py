@@ -63,11 +63,13 @@ TITRE_PROJET = ("Conception d'un système de recommandations "
                 "pour une agriculture optimisée par les données")
 AUTRICE = "Faïza KHELLADI"
 
-#: Les cinq sources du dossier technique, dans l'ordre de lecture.
+#: Les sources du dossier technique, dans l'ordre de lecture. La seconde
+#: chaîne suit la première : elle en reprend les chiffres pour les comparer.
 DOSSIER_TECHNIQUE = [
     "introduction.md",
     "data_preparation_summary.md",
     "model_experimentation_summary.md",
+    "model_experimentation_panel_summary.md",
     "prediction_api_summary.md",
     "streamlit_app_summary.md",
     "conclusion.md",
