@@ -31,6 +31,16 @@ from sklearn.model_selection import train_test_split
 
 from agritech.config import (
     CONSOLIDATED_PARQUET_PATH,
+    PANEL_DATASET_PARQUET_PATH,
+    PANEL_FEATURES_NOWCAST,
+    PANEL_FEATURES_PREVISION,
+    PANEL_SPLIT_BOUNDS,
+    PANEL_SPLIT_METADATA_PATH,
+    PANEL_SPLITS_DIR,
+    PANEL_TARGET,
+    PANEL_TEST_PATH,
+    PANEL_TRAIN_PATH,
+    PANEL_VAL_PATH,
     SPLIT_METADATA_PATH,
     SPLIT_PROPORTIONS,
     SPLIT_RANDOM_STATE,
@@ -107,6 +117,82 @@ def decouper(dataset: pd.DataFrame) -> dict[str, pd.DataFrame]:
     return {"train": train, "val": val, "test": test}
 
 
+#: Les mêmes trois partitions, pour la chaîne `real`.
+CHEMINS_PANEL = {"train": PANEL_TRAIN_PATH, "val": PANEL_VAL_PATH, "test": PANEL_TEST_PATH}
+ARTEFACTS_PANEL = {**CHEMINS_PANEL, "metadata": PANEL_SPLIT_METADATA_PATH}
+
+
+def charger_dataset_panel() -> tuple[pd.DataFrame, str]:
+    """Relit le dataset du panel FAO et calcule son empreinte."""
+    dataset = pd.read_parquet(PANEL_DATASET_PARQUET_PATH)
+    if not dataset.index.is_unique:
+        raise ValueError("Index non unique : les contrôles de chevauchement seraient faussés")
+    return dataset, empreinte(PANEL_DATASET_PARQUET_PATH)
+
+
+def decouper_chronologiquement(dataset: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """Découpe le panel **par année**, jamais au hasard.
+
+    Un découpage aléatoire placerait une année adjacente dans le train pour
+    **95 % des lignes de test**. Comme le rendement corrèle à 0,975 avec celui
+    de l'an passé, le modèle interpolerait entre deux années connues au lieu
+    de prédire, et la MAE serait optimiste de **25 %**. Le R², lui, ne bougerait
+    presque pas : la fuite serait invisible à qui ne regarde que lui.
+
+    Les bornes de `PANEL_SPLIT_BOUNDS` ont été choisies pour approcher
+    70 / 15 / 15 en volume — elles donnent 71,1 / 14,4 / 14,5 %.
+    """
+    fin_train = PANEL_SPLIT_BOUNDS["fin_train"]
+    fin_val = PANEL_SPLIT_BOUNDS["fin_val"]
+    annee = dataset["Year"]
+    return {
+        "train": dataset[annee <= fin_train],
+        "val": dataset[(annee > fin_train) & (annee <= fin_val)],
+        "test": dataset[annee > fin_val],
+    }
+
+
+def ecrire_panel(
+    partitions: dict[str, pd.DataFrame],
+    dataset: pd.DataFrame,
+    data_version: str,
+) -> dict:
+    """Écrit les partitions du panel, puis leurs métadonnées.
+
+    Les métadonnées portent les bornes d'années et non une graine : c'est ce
+    qui rend le découpage reproductible ici, et c'est aussi ce qu'il faut
+    relire pour savoir sur quelle période un modèle a été évalué.
+    """
+    PANEL_SPLITS_DIR.mkdir(parents=True, exist_ok=True)
+    for nom, partition in partitions.items():
+        partition.to_parquet(CHEMINS_PANEL[nom], index=False)
+
+    effectifs = {nom: len(d) for nom, d in partitions.items()}
+    total = sum(effectifs.values())
+    metadonnees = {
+        "source": PANEL_DATASET_PARQUET_PATH.name,
+        "data_version": data_version,
+        "split_version": calculer_split_version(CHEMINS_PANEL),
+        "strategie": "chronologique",
+        "bornes": PANEL_SPLIT_BOUNDS,
+        "annees": {
+            nom: [int(d["Year"].min()), int(d["Year"].max())] if len(d) else None
+            for nom, d in partitions.items()
+        },
+        "effectifs": effectifs,
+        "proportions": {nom: round(n / total, 4) for nom, n in effectifs.items()},
+        "cible": PANEL_TARGET,
+        "features_prevision": PANEL_FEATURES_PREVISION,
+        "features_nowcast": PANEL_FEATURES_NOWCAST,
+        "colonnes": list(dataset.columns),
+        "genere_le": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    PANEL_SPLIT_METADATA_PATH.write_text(
+        json.dumps(metadonnees, indent=2), encoding="utf-8"
+    )
+    return metadonnees
+
+
 def controler(partitions: dict[str, pd.DataFrame], dataset: pd.DataFrame) -> dict:
     """Les trois partitions se partagent le dataset, sans perte ni chevauchement.
 
@@ -180,9 +266,14 @@ def decider(data_version: str, forcer: bool = False) -> Decision:
     return Decision(False, "lot complet et à jour")
 
 
-def calculer_split_version() -> str:
-    """Empreinte des octets des trois partitions, dans un ordre fixe."""
-    combinee = "".join(empreinte(chemin, 64) for chemin in CHEMINS.values())
+def calculer_split_version(chemins: dict[str, Path] | None = None) -> str:
+    """Empreinte des octets des trois partitions, dans un ordre fixe.
+
+    `chemins` est résolu à l'appel : la chaîne `real` passe les siens, et une
+    valeur figée dans la signature pointerait sur ceux de la V1.
+    """
+    chemins = chemins or CHEMINS
+    combinee = "".join(empreinte(chemin, 64) for chemin in chemins.values())
     return hashlib.sha256(combinee.encode()).hexdigest()[:12]
 
 

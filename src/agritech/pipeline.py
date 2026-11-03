@@ -21,6 +21,7 @@ défaut, la chaîne s'arrête au découpage et dit ce qu'il reste à faire.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -38,13 +39,55 @@ from agritech.config import (
     DATA_DICTIONARY_PATH,
     FAO_PANEL_PATH,
     INTERIM_DIR,
+    PANEL_DATASET_PARQUET_PATH,
+    PANEL_DATASET_PATH,
+    PANEL_DICTIONARY_PATH,
     PROCESSED_DIR,
+    SOURCES,
     PROJECT_ROOT,
     SPLIT_METADATA_PATH,
 )
 
 #: Les étapes, dans l'ordre où elles doivent se dérouler.
 ETAPES = ["preparation", "decoupage", "entrainement", "export"]
+
+
+def resoudre_source(choisie: str | None) -> str:
+    """La source vient de la ligne de commande, ou de l'utilisateur, ou de rien.
+
+    **Aucune valeur par défaut.** Un script qui choisirait silencieusement
+    `simulated` faute de réponse produirait le mauvais dataset sans le dire.
+
+    La question n'est posée qu'en terminal. En CI, `input()` lirait une fin de
+    fichier et le job se bloquerait ou planterait sans message utile : on
+    échoue immédiatement, avec la marche à suivre. `isatty()` ne suffit pas —
+    sous Git Bash il répond vrai même avec une entrée redirigée — donc on
+    attrape aussi la fin de fichier, symptôme certain d'une exécution non
+    interactive.
+    """
+    if choisie:
+        return choisie
+
+    sans_source = SystemExit(
+        "Aucune source choisie.\n"
+        f"  Préciser --source parmi {', '.join(SOURCES)}.\n"
+        "  La question n'est posée qu'en terminal interactif ; ici l'entrée\n"
+        "  standard n'en est pas un (CI, Docker, redirection)."
+    )
+    if not sys.stdin.isatty():
+        raise sans_source
+
+    print("Quelle source de données ?")
+    print("  simulated — parcelles du jeu A, la chaîne de la V1")
+    print("  real      — panel FAO, trois retards et le choc partagé")
+    while True:
+        try:
+            reponse = input(f"  source [{' / '.join(SOURCES)}] : ").strip().lower()
+        except EOFError:
+            raise sans_source from None
+        if reponse in SOURCES:
+            return reponse
+        print(f"  Réponse attendue : {' ou '.join(SOURCES)}.")
 
 
 @dataclass(frozen=True)
@@ -251,6 +294,123 @@ def lancer_preparation(forcer: bool = False) -> Resultat:
         f"{bilan['lignes']:,} lignes × {bilan['colonnes']} colonnes, "
         f"data_version {decoupage.empreinte(CONSOLIDATED_PARQUET_PATH)}",
         bilan=bilan,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Chaîne `real` : le panel FAO
+#
+# Même discipline que la chaîne V1 — on ne réécrit jamais un livrable existant
+# sans avoir vérifié qu'on reproduit le même contenu. Les deux chaînes ne
+# partagent aucune colonne : elles ont donc leurs propres fichiers, et rien
+# n'est mutualisé qui pourrait les faire diverger en silence.
+# --------------------------------------------------------------------------- #
+
+
+def livrables_panel() -> tuple[Path, ...]:
+    """Les trois fichiers que la chaîne `real` produit.
+
+    Le dictionnaire fait partie du lot : un dataset dont `choc` n'est pas
+    documenté comme indisponible avant les récoltes serait un piège pour
+    l'étape suivante.
+    """
+    return (PANEL_DATASET_PATH, PANEL_DATASET_PARQUET_PATH, PANEL_DICTIONARY_PATH)
+
+
+def ecrire_preparation_panel(dataset: pd.DataFrame) -> dict[str, Path]:
+    """Écrit le dataset du panel, en CSV lisible et en Parquet typé."""
+    PANEL_DATASET_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PANEL_DICTIONARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    dataset.to_csv(PANEL_DATASET_PATH, index=False)
+    dataset.to_parquet(PANEL_DATASET_PARQUET_PATH, index=False, compression="snappy")
+    preparation.dictionnaire_du_panel().to_csv(PANEL_DICTIONARY_PATH)
+    return {
+        "csv": PANEL_DATASET_PATH,
+        "parquet": PANEL_DATASET_PARQUET_PATH,
+        "dictionnaire": PANEL_DICTIONARY_PATH,
+    }
+
+
+def etat_preparation_panel() -> tuple[bool, str]:
+    """Le dataset du panel est-il déjà là, en entier ?"""
+    attendus = livrables_panel()
+    presents = [c for c in attendus if c.exists()]
+    if not presents:
+        return False, "aucun livrable"
+    if len(presents) < len(attendus):
+        return False, f"livrable incomplet ({len(presents)}/{len(attendus)} fichiers)"
+    return True, f"data_version {decoupage.empreinte(PANEL_DATASET_PARQUET_PATH)}"
+
+
+def lancer_preparation_panel(forcer: bool = False) -> Resultat:
+    """Construit le dataset du panel FAO, sans écraser à l'aveugle."""
+    attendus = livrables_panel()
+    presents = [c for c in attendus if c.exists()]
+
+    if presents and not forcer:
+        if len(presents) < len(attendus):
+            manquants = [c.name for c in attendus if not c.exists()]
+            raise RuntimeError(
+                f"LIVRABLE PARTIEL — {len(presents)}/{len(attendus)} fichiers présents.\n"
+                f"  manquants : {', '.join(manquants)}\n"
+                "  Vider data/processed/fao_panel_dataset.* puis relancer, ou --forcer."
+            )
+        attendu = pd.read_parquet(PANEL_DATASET_PARQUET_PATH)
+        obtenu = preparation.preparer_panel()
+        if not attendu.equals(obtenu):
+            raise RuntimeError(
+                "Le dataset du panel régénéré diffère de celui du disque.\n"
+                f"  lignes   : {len(attendu):,} contre {len(obtenu):,}\n"
+                f"  colonnes : {list(attendu.columns)} contre {list(obtenu.columns)}\n"
+                "  Écraser périmerait les runs MLflow. Relancer avec --forcer\n"
+                "  si la différence est voulue."
+            )
+        return Resultat(
+            "preparation", False, f"déjà à jour, contenu vérifié — {etat_preparation_panel()[1]}"
+        )
+
+    dataset = preparation.preparer_panel()
+    bilan = preparation.controler_panel(dataset)
+    ecrire_preparation_panel(dataset)
+    return Resultat(
+        "preparation",
+        True,
+        f"{bilan['lignes']:,} lignes × {bilan['colonnes']} colonnes, "
+        f"data_version {decoupage.empreinte(PANEL_DATASET_PARQUET_PATH)}",
+        bilan=bilan,
+    )
+
+
+def lancer_decoupage_panel(forcer: bool = False) -> Resultat:
+    """Découpe le panel **par année**. Un découpage aléatoire fuirait."""
+    dataset, data_version = decoupage.charger_dataset_panel()
+    presents = [c for c in decoupage.ARTEFACTS_PANEL.values() if c.exists()]
+
+    if presents and not forcer:
+        if len(presents) == len(decoupage.ARTEFACTS_PANEL):
+            anciennes = json.loads(
+                decoupage.PANEL_SPLIT_METADATA_PATH.read_text(encoding="utf-8")
+            )
+            if anciennes.get("data_version") == data_version:
+                return Resultat(
+                    "decoupage", False,
+                    f"partitions à jour — split_version {anciennes['split_version']}",
+                )
+        raise RuntimeError(
+            "Les partitions du panel ne correspondent plus au dataset.\n"
+            "  Relancer avec --forcer pour les regénérer."
+        )
+
+    partitions = decoupage.decouper_chronologiquement(dataset)
+    controle = decoupage.controler(partitions, dataset)
+    metadonnees = decoupage.ecrire_panel(partitions, dataset, data_version)
+    return Resultat(
+        "decoupage",
+        True,
+        f"train {controle['train']['lignes']:,} / val {controle['val']['lignes']:,} / "
+        f"test {controle['test']['lignes']:,} — split_version "
+        f"{metadonnees['split_version']}",
+        bilan=controle,
     )
 
 

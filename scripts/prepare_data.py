@@ -36,12 +36,22 @@ import argparse
 import sys
 
 from agritech import pipeline
-from agritech.config import CONSOLIDATED_PARQUET_PATH, CONSOLIDATED_PATH
+from agritech.config import (
+    CONSOLIDATED_PARQUET_PATH,
+    CONSOLIDATED_PATH,
+    PANEL_DATASET_PARQUET_PATH,
+    PANEL_DATASET_PATH,
+    SOURCES,
+)
 
 
 def analyser_arguments():
     parseur = argparse.ArgumentParser(
-        description="Construit le dataset consolidé à partir des six fichiers sources.")
+        description="Construit un dataset d'entraînement à partir des fichiers sources.")
+    parseur.add_argument(
+        "--source", choices=SOURCES, default=None,
+        help="'simulated' : parcelles du jeu A (chaîne V1). "
+             "'real' : panel FAO et ses quatre variables dérivées.")
     parseur.add_argument(
         "--verifier", action="store_true",
         help="compare le dataset régénéré à celui du disque, sans rien écrire")
@@ -85,13 +95,23 @@ def rendre_compte_verification(rapport: dict) -> int:
 
 def main() -> int:
     arguments = analyser_arguments()
+    source = pipeline.resoudre_source(arguments.source)
 
     if arguments.verifier:
+        if source == "real":
+            print("--verifier ne couvre que la chaîne 'simulated'.", file=sys.stderr)
+            print("  Pour 'real', relancer sans --verifier : le contrôle de",
+                  file=sys.stderr)
+            print("  non-régression est intégré à la préparation.", file=sys.stderr)
+            return 1
         print("Vérification — rien ne sera écrit\n")
         return rendre_compte_verification(pipeline.verifier_preparation())
 
     try:
-        resultat = pipeline.lancer_preparation(forcer=arguments.forcer)
+        if source == "real":
+            resultat = pipeline.lancer_preparation_panel(forcer=arguments.forcer)
+        else:
+            resultat = pipeline.lancer_preparation(forcer=arguments.forcer)
     except RuntimeError as refus:
         # Un refus est un diagnostic, pas un plantage : il porte déjà
         # l'explication et la marche à suivre.
@@ -99,14 +119,17 @@ def main() -> int:
         return 1
 
     if not resultat.agi:
-        print(f"Préparation : {resultat.detail}")
+        print(f"Préparation [{source}] : {resultat.detail}")
         return 0
 
-    print("Dataset consolidé")
+    print(f"Dataset [{source}]")
     for libelle, valeur in resultat.bilan.items():
-        print(f"  {libelle.replace('_', ' '):<26} {valeur:>12,}")
+        gabarit = f"{valeur:>12,}" if isinstance(valeur, int) else f"{valeur:>12}"
+        print(f"  {libelle.replace('_', ' '):<26} {gabarit}")
     print()
-    for chemin in (CONSOLIDATED_PATH, CONSOLIDATED_PARQUET_PATH):
+    sorties = ((PANEL_DATASET_PATH, PANEL_DATASET_PARQUET_PATH) if source == "real"
+               else (CONSOLIDATED_PATH, CONSOLIDATED_PARQUET_PATH))
+    for chemin in sorties:
         print(f"  {chemin.name:<40} {chemin.stat().st_size / 1024 ** 2:>8,.1f} Mo")
     print()
     print(f"Préparation : {resultat.detail}")

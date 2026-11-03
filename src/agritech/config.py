@@ -171,6 +171,65 @@ SEUIL_FAIBLE_PLUIE_MM = 400
 HG_PER_HA_TO_T_PER_HA = 10_000
 
 # --------------------------------------------------------------------------- #
+# Deuxième chaîne : le panel FAO
+#
+# `--source real` construit un second dataset, à partir du panel FAO et non des
+# parcelles simulées. Les deux chaînes **ne partagent aucune colonne** : elles
+# cohabitent dans le dépôt, pas dans le même espace de variables. Chacune a
+# donc ses chemins, ses variables, sa cible et son découpage.
+# --------------------------------------------------------------------------- #
+
+SOURCES = ("simulated", "real")
+
+PANEL_DATASET_PATH = PROCESSED_DIR / "fao_panel_dataset.csv"
+PANEL_DATASET_PARQUET_PATH = PROCESSED_DIR / "fao_panel_dataset.parquet"
+PANEL_DICTIONARY_PATH = INTERIM_DIR / "fao_panel_dictionary.csv"
+
+PANEL_SPLITS_DIR = SPLITS_DIR / "real"
+PANEL_TRAIN_PATH = PANEL_SPLITS_DIR / "train.parquet"
+PANEL_VAL_PATH = PANEL_SPLITS_DIR / "val.parquet"
+PANEL_TEST_PATH = PANEL_SPLITS_DIR / "test.parquet"
+PANEL_SPLIT_METADATA_PATH = PANEL_SPLITS_DIR / "split_metadata.json"
+
+#: Clés du panel. **Jamais des variables explicatives**, mais indispensables :
+#: elles calculent les retards, construisent le choc, portent le découpage
+#: chronologique et assurent la traçabilité jusqu'à la source FAO.
+PANEL_KEYS = ["Area", "Item", "Year"]
+
+PANEL_TARGET = "yield_t_ha"
+
+#: Les trois retards, connus avant les récoltes : c'est la vraie prévision.
+PANEL_FEATURES_PREVISION = ["lag1", "lag2", "lag3"]
+
+#: `choc` exige les rendements de l'année COURANTE des autres cultures du pays.
+#: Utilisable en nowcasting seulement, jamais en prévision — la distinction est
+#: dans le nom pour qu'aucune étape ne puisse les confondre par inadvertance.
+PANEL_FEATURES_NOWCAST = PANEL_FEATURES_PREVISION + ["choc"]
+
+#: Les quatre variables écrites dans le dataset, et **aucun encodage
+#: catégoriel** : mesuré, `Area` et `Item` en one-hot dégradent la MAE de
+#: 0,6708 à 0,6890, l'effet fixe pays × culture étant déjà porté par `lag1`.
+#: Conséquence utile : aucun encodeur à ajuster, sérialiser ni synchroniser
+#: entre entraînement et service.
+PANEL_FEATURES = PANEL_FEATURES_NOWCAST
+
+#: Les trois covariables du panel. Elles sont **dans le dataset sans être des
+#: variables du modèle** — §4.3 a mesuré qu'elles n'apportent rien une fois les
+#: retards présents, et `rain_mm` n'a même aucune variance intra-pays pour 159
+#: pays sur 161. Les conserver garde le dataset descriptif et laisse l'étape de
+#: modélisation libre de les reprendre ; les **exiger** coûterait 76 % des
+#: lignes, leur couverture allant de 44 à 57 %.
+PANEL_COVARIATES = ["avg_temp", "rain_mm", "pesticides_t"]
+
+#: Ce que le fichier porte : clés, variables, covariables, cible.
+PANEL_COLUMNS = PANEL_KEYS + PANEL_FEATURES + PANEL_COVARIATES + [PANEL_TARGET]
+
+#: Découpage **chronologique**. L'aléatoire stratifié de la V1 placerait une
+#: année adjacente dans le train pour 95 % des lignes de test et sous-estimerait
+#: la MAE de 25 %. Ces bornes donnent 71,1 / 14,4 / 14,5 % des lignes.
+PANEL_SPLIT_BOUNDS = {"fin_train": 2002, "fin_val": 2009}
+
+# --------------------------------------------------------------------------- #
 # Suivi d'expériences et artefacts de modèle
 # --------------------------------------------------------------------------- #
 
