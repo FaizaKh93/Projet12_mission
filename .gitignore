@@ -26,6 +26,11 @@ models/*
 # et une CI n'a pas accès au registre MLflow local. 7 Ko à eux deux.
 !models/modele_api.joblib
 !models/modele_api.json
+# Ceux du service national, pour les mêmes raisons. L'artefact est plus gros —
+# 54 Ko — parce qu'il embarque les derniers retards de 1 106 séries : c'est ce
+# qui permet à l'API de répondre à (pays, culture) sans accès aux données.
+!models/modele_api_panel.joblib
+!models/modele_api_panel.json
 
 # ---------- MLflow ----------
 # Tracking local : volumineux et propre à ta machine.

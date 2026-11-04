@@ -22,6 +22,7 @@ politesse : elles sont donc testées comme le reste.
 from __future__ import annotations
 
 import json
+import logging
 from types import SimpleNamespace
 
 import joblib
@@ -34,10 +35,15 @@ from agritech.config import (
     ALIAS_CHAMPION,
     API_METADATA_PATH,
     API_MODEL_PATH,
+    CULTURES_PANEL_EN_FRANCAIS,
     DEMI_INTERVALLE_PREDICTION_95_T_HA,
     DOMAINE_ENTRAINEMENT,
     MLFLOW_DB_PATH,
     MODALITES_CATEGORIELLES,
+    PANEL_ANNEE_PREDITE,
+    PANEL_ANNEE_REFERENCE,
+    PANEL_COUVERTURE_MESUREE,
+    PANEL_INTERVALLE_PLANCHER_95_T_HA,
     PRIX_REFERENCE_SOURCE,
     SEUIL_ECART_RENDEMENT_PERTINENT_T_HA,
     TRAIN_PATH,
@@ -50,7 +56,7 @@ from agritech.preprocessing import (
 )
 import scripts.export_api_model as export
 from api import journal, service
-from api.main import app
+from api.main import _charger, app
 from api.schemas import (CHAMP_VERS_VARIABLE, PredictionRequete,
                          RecommandationRequete)
 
@@ -113,6 +119,26 @@ def journal_vide():
     journal.JOURNAL.clear()
     yield journal.JOURNAL
     journal.JOURNAL.clear()
+
+
+@pytest.fixture
+def lignes_stdout():
+    """Recueille les lignes JSON que le journal émet sur la sortie standard.
+
+    `capsys` ne conviendrait pas : le gestionnaire retient le `sys.stdout`
+    du premier import, et la redirection de pytest arrive après. On se
+    branche donc sur le logger lui-même, qui est le vrai point d'émission.
+    """
+    recueillies = []
+
+    class Collecteur(logging.Handler):
+        def emit(self, enregistrement):
+            recueillies.append(json.loads(enregistrement.getMessage()))
+
+    collecteur = Collecteur()
+    journal.LOGGER.addHandler(collecteur)
+    yield recueillies
+    journal.LOGGER.removeHandler(collecteur)
 
 
 @pytest.fixture(scope="module")
@@ -932,8 +958,12 @@ def test_divergence_nommee_puis_reprise_convergente(promotion, monkeypatch):
     donc nommer l'état divergent et offrir une reprise, au lieu de
     revendiquer une atomicité qu'il n'a pas.
     """
-    def refuser(_provenance):
-        """Rend l'écriture du fichier impossible, l'alias étant déjà posé."""
+    def refuser(_provenance, _chemin=None):
+        """Rend l'écriture du fichier impossible, l'alias étant déjà posé.
+
+        La signature suit celle de la vraie fonction, qui reçoit aussi le
+        fichier où écrire : chaque chaîne de service a le sien.
+        """
         raise OSError(28, "No space left on device (simulé)")
 
     original = export._ecrire_provenance
@@ -993,6 +1023,24 @@ def test_health_rend_le_modele_charge(client):
     assert corps["served_model"]["source"] == "bundled-joblib"
 
 
+def test_health_annonce_les_deux_modeles_servis(client):
+    """Les deux artefacts, nommément, et non une liste anonyme.
+
+    Un client qui ne connaît que la chaîne des parcelles continue de lire
+    `served_model` ; celui qui interroge `/national/*` sait quelle version lui
+    répond. Les deux registres sont distincts, parce que les deux contrats
+    d'entrée le sont.
+    """
+    corps = client.get("/health").json()
+    parcelle = corps["served_model"]
+    national = corps["served_model_national"]
+
+    assert national["source"] == "bundled-joblib"
+    assert parcelle["registry"] != national["registry"], (
+        "les deux modèles ne peuvent pas venir du même nom au registre : "
+        "leurs versions ne sont pas interchangeables")
+
+
 def test_model_info_fait_foi_sur_les_modalites(client, artefact):
     """La liste exposée est celle de l'encodeur ajusté, non une copie libre."""
     corps = client.get("/model/info").json()
@@ -1007,7 +1055,7 @@ def test_model_info_fait_foi_sur_les_modalites(client, artefact):
 
 
 def test_openapi_documente_toutes_les_routes(client):
-    """Les six routes et leurs modèles sont documentés.
+    """Les neuf routes et leurs modèles sont documentés.
 
     Liste écrite en dur, délibérément : une route ajoutée sans être annoncée
     ici fait échouer ce test, ce qui force à se demander si elle a bien sa
@@ -1015,6 +1063,9 @@ def test_openapi_documente_toutes_les_routes(client):
     """
     schema = client.get("/openapi.json").json()
     assert sorted(schema["paths"]) == ["/health", "/logs", "/model/info",
+                                       "/national/predict",
+                                       "/national/ranking",
+                                       "/national/series",
                                        "/predict", "/recommend",
                                        "/reference/prices"]
     assert "PredictionRequete" in schema["components"]["schemas"]
@@ -1164,6 +1215,122 @@ def test_journal_conserve_un_corps_illisible(client, journal_vide):
     assert "_non_json" in entree["request"]
 
 
+def test_journal_conserve_une_requete_sans_corps(client, journal_vide):
+    """Un corps absent n'est pas un corps illisible : `null`, pas `{}`."""
+    client.post("/predict", content=b"",
+                headers={"Content-Type": "application/json"})
+    entree = client.get("/logs").json()["entries"][0]
+
+    assert entree["status_code"] == 422
+    assert entree["request"] is None
+
+
+# --------------------------------------------------------------------------- #
+# La sortie standard
+#
+# L'autre destination du journal — la seule que l'hébergeur conserve, et la
+# seule qui survive à une mise en veille. Ce qu'elle ne porte **pas** compte
+# autant que ce qu'elle porte.
+# --------------------------------------------------------------------------- #
+
+
+def test_la_sortie_standard_recoit_les_metadonnees(client, journal_vide,
+                                                   lignes_stdout):
+    """Route, statut et durée : de quoi suivre le service sans le deviner."""
+    client.post("/predict", json={**CONTEXTE, "crop": "Wheat"})
+
+    ligne = lignes_stdout[-1]
+    assert ligne["event"] == "appel_api"
+    assert ligne["level"] == "INFO"
+    assert ligne["method"] == "POST" and ligne["route"] == "/predict"
+    assert ligne["status"] == 200
+    assert ligne["duration_ms"] >= 0
+
+
+def test_la_sortie_standard_ne_porte_aucun_corps(client, journal_vide,
+                                                 lignes_stdout):
+    """Les budgets de `/recommend` ne doivent pas atterrir dans un dashboard.
+
+    Ce sont les prix et les charges de l'utilisateur. Le tampon les garde,
+    protégé par rien mais éphémère ; la sortie standard est conservée des
+    jours durant par l'hébergeur, et consultable par quiconque accède à son
+    tableau de bord.
+    """
+    client.post("/recommend", json={
+        **CONTEXTE, "budgets": {"Rice": BUDGET_RIZ, "Wheat": BUDGET_BLE}})
+
+    ligne = lignes_stdout[-1]
+    assert ligne["route"] == "/recommend"
+    assert "request" not in ligne and "response" not in ligne
+    # Ni les valeurs, ni même les noms des champs économiques.
+    assert "variable_costs_eur_ha" not in json.dumps(ligne)
+    assert "price_eur_t" not in json.dumps(ligne)
+
+
+def test_le_request_id_relie_la_ligne_et_le_tampon(client, journal_vide,
+                                                   lignes_stdout):
+    """Sans ce lien, un incident vu dans les logs resterait sans contexte."""
+    client.post("/predict", json={**CONTEXTE, "crop": "Wheat"})
+
+    entree = client.get("/logs").json()["entries"][0]
+    assert entree["request_id"] == lignes_stdout[-1]["request_id"]
+
+
+def test_un_appel_rejete_sort_en_avertissement(client, journal_vide,
+                                               lignes_stdout):
+    """Un 422 se filtre par son niveau dans l'explorateur de l'hébergeur."""
+    client.post("/predict", json={**CONTEXTE, "crop": "Kiwi"})
+
+    ligne = lignes_stdout[-1]
+    assert ligne["status"] == 422
+    assert ligne["level"] == "WARNING"
+
+
+def test_le_logger_n_est_configure_qu_une_fois():
+    """Un second gestionnaire ferait apparaître chaque appel deux fois."""
+    avant = len(journal.LOGGER.handlers)
+
+    assert journal._sortie_standard() is journal.LOGGER
+    assert len(journal.LOGGER.handlers) == avant
+
+
+def test_un_chargement_en_echec_est_trace_puis_releve(lignes_stdout):
+    """Un conteneur qui refuse de démarrer ne répond à aucune route.
+
+    Ni `/health` ni `/logs` ne diront jamais pourquoi : la trace sur stdout
+    est la seule qui parte avant l'arrêt du processus. Elle ne rattrape pas
+    l'erreur — l'exception continue de remonter.
+    """
+    def absent():
+        raise FileNotFoundError("modele_api.joblib")
+
+    with pytest.raises(FileNotFoundError):
+        _charger("parcelle", absent, lambda modele: None)
+
+    echec = lignes_stdout[-1]
+    assert echec["event"] == "chargement_modele_echoue"
+    assert echec["level"] == "ERROR"
+    assert echec["model"] == "parcelle"
+    assert echec["error_type"] == "FileNotFoundError"
+
+
+def test_le_demarrage_trace_la_provenance_des_deux_modeles(lignes_stdout):
+    """Quel modèle servait au moment d'un incident — la question d'après.
+
+    Le `lifespan` est rejoué ici : c'est le seul moyen d'observer ce qu'il
+    émet, puisque la fixture `client` de portée module l'a déjà traversé.
+    """
+    with TestClient(app):
+        pass
+
+    charges = {ligne["model"]: ligne for ligne in lignes_stdout
+               if ligne["event"] == "modele_charge"}
+    assert set(charges) == {"parcelle", "national"}
+    for ligne in charges.values():
+        assert ligne["source"] in ("bundled-joblib", "mlflow-registry")
+        assert ligne["version"] >= 1
+
+
 def test_journal_ignore_les_routes_de_service(client, journal_vide):
     """`/health` noierait le journal, `/logs` s'auto-alimenterait."""
     client.get("/health")
@@ -1203,3 +1370,397 @@ def test_enumeration_des_cultures_dans_le_schema():
     schema = json.dumps(PredictionRequete.model_json_schema())
     for culture in CULTURES:
         assert f'"{culture}"' in schema
+
+
+# --------------------------------------------------------------------------- #
+# Service national — la seconde chaîne
+#
+# Ce que ces tests surveillent n'est pas la qualité du modèle : c'est que
+# l'API **dise ce qu'elle sert**. Une prévision portant sur l'année suivant le
+# dernier relevé FAO, un classement par rendement et non par rentabilité, un
+# intervalle empirique qui n'est pas une garantie, et un refus net pour toute
+# série dont l'historique s'arrête trop tôt.
+# --------------------------------------------------------------------------- #
+
+#: Un couple servable, choisi dans la table embarquée plutôt qu'écrit en dur :
+#: le jour où ce pays cesse de déclarer cette culture, le test doit continuer
+#: de décrire le service, pas une donnée disparue.
+COUPLE = ("France", "Wheat")
+
+
+@pytest.fixture(scope="module")
+def national(client):
+    """Le modèle national, tel que le démarrage de l'application l'a chargé."""
+    return client.app.state.modele_national
+
+
+@pytest.fixture(scope="module")
+def table_nationale(national):
+    """La table de retards embarquée : c'est elle qui fait foi."""
+    return service._derivation(national)
+
+
+def test_les_annees_du_contrat_decrivent_l_artefact(table_nationale):
+    """`config` et la table embarquée doivent parler de la même année.
+
+    Les deux constantes sont des copies, utiles parce que le contrat et la
+    documentation doivent connaître l'année avant tout chargement de modèle.
+    Une table réexportée sur un panel plus récent sans mise à jour de `config`
+    ferait annoncer une année fausse ; ce test fait échouer ce cas au lieu de
+    le laisser passer en silence.
+    """
+    assert table_nationale.annee_reference_ == PANEL_ANNEE_REFERENCE
+    assert table_nationale.annee_predite_ == PANEL_ANNEE_PREDITE
+
+
+@pytest.mark.parametrize("source", ["simulated", "real"])
+def test_les_etiquettes_portent_toutes_les_cles_controlees(source, monkeypatch):
+    """Le registre doit porter tout ce que la promotion compare.
+
+    Ce test ferme un défaut constaté : les métadonnées propres au service
+    national étaient écrites dans le fichier de provenance mais pas posées en
+    tags sur la version. La promotion comparait alors `2016` à `None` et
+    refusait l'alias — correctement, mais après coup, une fois la version déjà
+    publiée.
+
+    `versions_des_donnees` est détournée : ce test porte sur la **couverture
+    des clés**, pas sur les empreintes, et il doit tourner sans `data/`.
+    """
+    monkeypatch.setattr(export, "versions_des_donnees", lambda _source: {
+        "data_version": "x", "split_version": "y",
+        "hypotheses_economiques": "z"})
+
+    chaine = export.chaine_de_service(source)
+    version = SimpleNamespace(version=1, run_id="r" * 32,
+                              tags={"modele": "ridge"})
+    etiquettes = export.etiquettes_de_version(
+        chaine, version, {cle: 0 for cle in chaine.cles_supplementaires},
+        "sha256")
+
+    controlees = {*export.CLES_CONCORDANCE, *chaine.cles_supplementaires}
+    assert controlees <= set(etiquettes), (
+        f"clés contrôlées par la promotion mais absentes des tags : "
+        f"{sorted(controlees - set(etiquettes))}")
+
+
+def test_les_variables_d_environnement_concordent_avec_l_export():
+    """Le service et l'export doivent nommer la même variable de bascule.
+
+    L'export affiche cette variable après chaque promotion. Si les deux noms
+    divergeaient, la commande affichée ne servirait rien du tout — et l'API
+    continuerait de servir son artefact embarqué sans le signaler.
+    """
+    for source, attendue in (("simulated", service.VARIABLE_URI),
+                             ("real", service.VARIABLE_URI_PANEL)):
+        assert export.chaine_de_service(source).variable_uri == attendue
+
+
+def test_national_predict_annonce_l_annee_qu_il_predit(client):
+    """L'année cible est celle qui suit le dernier relevé, et elle est dite.
+
+    C'est la réserve la plus facile à oublier dans une interface : le panel
+    s'arrête en {reference_year}, donc cette prévision n'est pas celle de la
+    campagne en cours. Le champ existe pour qu'aucun affichage ne puisse la
+    présenter comme telle.
+    """
+    aire, culture = COUPLE
+    corps = client.post("/national/predict",
+                        json={"area": aire, "item": culture}).json()
+
+    assert corps["reference_year"] == PANEL_ANNEE_REFERENCE
+    assert corps["target_year"] == PANEL_ANNEE_REFERENCE + 1
+    assert corps["data_quality"]["training_data"] == "real"
+    assert any(str(corps["target_year"]) in ligne
+               for ligne in corps["data_quality"]["limitations"])
+
+
+def test_national_predict_rend_l_historique_qui_a_servi(client,
+                                                        table_nationale):
+    """Les trois rendements du calcul, avec leurs années, du plus récent.
+
+    Sans eux, un écart au dernier relevé serait inexplicable : le modèle
+    revient vers la moyenne des trois ans, et sur une série accidentée cela
+    déplace la prévision du simple au quadruple.
+    """
+    aire, culture = COUPLE
+    corps = client.post("/national/predict",
+                        json={"area": aire, "item": culture}).json()
+
+    annees = [releve["year"] for releve in corps["history"]]
+    assert annees == [PANEL_ANNEE_REFERENCE - rang for rang in range(3)]
+
+    servis = [releve["yield_t_ha"] for releve in corps["history"]]
+    attendus = list(table_nationale.retards(aire, culture).values())
+    assert servis == pytest.approx(attendus, abs=1e-4)
+
+
+@pytest.mark.parametrize("charge, motif", [
+    ({"area": "France", "item": "Cassava"}, "culture non cultivée dans ce pays"),
+    ({"area": "Narnia", "item": "Wheat"}, "pays absent du panel"),
+])
+def test_national_predict_refuse_un_couple_non_servable(client, charge, motif):
+    """Un couple hors table est refusé, et le message dit où trouver la liste.
+
+    Servir ce couple supposerait de lui inventer un historique : le modèle
+    recevrait la médiane de `train` en guise de passé national, et rendrait un
+    chiffre qui ne décrit rien.
+    """
+    reponse = client.post("/national/predict", json=charge)
+
+    assert reponse.status_code == 422
+    assert "non servable" in reponse.json()["detail"]
+
+
+def test_national_predict_refuse_une_condition_de_parcelle(client):
+    """Les conditions ne sont pas des champs facultatifs : elles n'existent pas.
+
+    Les accepter en les ignorant serait le pire des deux mondes — une
+    interface pourrait les proposer, et l'utilisateur croirait que sa
+    température a compté. Le contrat les rejette donc explicitement.
+    """
+    aire, culture = COUPLE
+    reponse = client.post("/national/predict",
+                          json={"area": aire, "item": culture,
+                                "temperature_celsius": 25.0})
+
+    assert reponse.status_code == 422
+
+
+def test_le_contrat_national_ne_demande_que_le_pays_et_la_culture(client):
+    """Le schéma public ne porte aucun champ de condition."""
+    schema = (client.get("/openapi.json").json()
+              ["components"]["schemas"]["PredictionNationaleRequete"])
+
+    assert sorted(schema["required"]) == ["area", "item"]
+    assert sorted(schema["properties"]) == ["area", "item"]
+
+
+# --------------------------------------------------------------------------- #
+# L'intervalle empirique
+# --------------------------------------------------------------------------- #
+
+
+def test_intervalle_national_suit_le_niveau_predit():
+    """La largeur est proportionnelle à la prédiction, là où elle domine.
+
+    C'est toute la raison de cette calibration : l'écart-type du résidu va de
+    0,24 à 2,95 t/ha du premier au dernier décile. Une largeur unique couvre
+    100 % en bas de gamme et 76 % au dernier décile.
+    """
+    largeurs = {}
+    for valeur in (5.0, 20.0):
+        intervalle = service._intervalle_empirique(valeur)
+        largeurs[valeur] = (intervalle.upper_t_ha - intervalle.lower_t_ha) / valeur
+
+    assert largeurs[5.0] == pytest.approx(largeurs[20.0], rel=1e-3)
+
+
+def test_intervalle_national_s_elargit_aux_tres_faibles_rendements():
+    """Sous 1 t/ha, le plancher absolu prend le relais du relatif.
+
+    Mesuré : le relatif seul tombe à 76,8 % de couverture sous 0,5 t/ha, parce
+    qu'un pourcentage d'une petite valeur est une largeur minuscule. Le
+    plancher le ramène à 96,0 % sans élargir l'intervalle ailleurs.
+    """
+    intervalle = service._intervalle_empirique(0.3)
+    bas_plancher, haut_plancher = PANEL_INTERVALLE_PLANCHER_95_T_HA
+
+    # La borne haute est celle du plancher, non celle du relatif.
+    assert intervalle.upper_t_ha == pytest.approx(0.3 + haut_plancher, abs=1e-3)
+    # Et la borne basse est tronquée : un rendement ne peut être négatif.
+    assert 0.3 + bas_plancher < 0 and intervalle.lower_t_ha == 0.0
+
+
+def test_intervalle_national_ne_promet_pas_une_garantie(client):
+    """La couverture annoncée est celle **mesurée**, et dite non individuelle.
+
+    Un intervalle qui afficherait « 95 % » sans son taux constaté laisserait
+    croire à une garantie par prédiction. Elle n'existe pas : la couverture
+    varie de 90,7 % à 98,9 % selon la culture.
+
+    La réserve est cherchée dans `data_quality`, où elle figure **une fois**,
+    et non dans chaque intervalle : portée par l'intervalle, elle serait
+    recopiée à chaque culture du classement.
+    """
+    aire, culture = COUPLE
+    corps = client.post("/national/predict",
+                        json={"area": aire, "item": culture}).json()
+    intervalle = corps["prediction_interval_95"]
+
+    assert intervalle["nominal_coverage"] == 0.95
+    assert intervalle["measured_coverage"] == PANEL_COUVERTURE_MESUREE["globale"]
+    assert intervalle["lower_t_ha"] < intervalle["upper_t_ha"]
+    assert "method" not in intervalle and "caveat" not in intervalle
+    assert any("garantie" in ligne
+               for ligne in corps["data_quality"]["limitations"])
+
+
+# --------------------------------------------------------------------------- #
+# Le classement national
+# --------------------------------------------------------------------------- #
+
+
+def test_national_ranking_classe_les_cultures_du_pays(client, table_nationale):
+    """Les cultures du pays, toutes, et triées par rendement décroissant.
+
+    L'ensemble doit être exactement celui de la table : une culture en plus
+    serait une culture sans historique national, une culture en moins serait
+    une comparaison tronquée présentée comme complète.
+    """
+    aire, _ = COUPLE
+    corps = client.post("/national/ranking", json={"area": aire}).json()
+    rendements = [rang["yield_t_ha"] for rang in corps["ranking"]]
+
+    assert rendements == sorted(rendements, reverse=True)
+    assert (set(rang["item"] for rang in corps["ranking"])
+            == set(table_nationale.cultures_par_pays()[aire]))
+
+
+def test_national_ranking_rend_les_libelles_francais(client):
+    """L'interface n'a pas à tenir sa propre table de traduction."""
+    aire, _ = COUPLE
+    corps = client.post("/national/ranking", json={"area": aire}).json()
+
+    for rang in corps["ranking"]:
+        assert rang["item_fr"] == CULTURES_PANEL_EN_FRANCAIS[rang["item"]]
+
+
+def test_national_ranking_n_est_pas_un_classement_economique(client):
+    """Le mot « rentable » appellerait une marge, et il en manque les prix.
+
+    Six prix sur dix manquent pour ce vocabulaire de cultures, et sur les
+    quatre tarifées l'ordre change entre les tonnes et la valeur. La réponse
+    doit donc nommer ce qu'elle classe, et dire ce qu'elle ne classe pas.
+    """
+    aire, _ = COUPLE
+    corps = client.post("/national/ranking", json={"area": aire}).json()
+
+    assert "rendement national estimé" in corps["ranking_note"]
+    assert "non par rentabilité" in corps["ranking_note"]
+    assert "prix" in corps["economic_note"]
+    assert corps["data_quality"]["economic_assumptions_version"] is None
+
+
+def test_national_ranking_compare_la_prevision_au_dernier_releve(
+        client, table_nationale):
+    """Chaque ligne porte le relevé de l'année de référence.
+
+    C'est ce qui rend lisible ce que le modèle reconduit : une prévision
+    proche du dernier relevé est une trajectoire poursuivie, un grand écart
+    signale une série accidentée.
+    """
+    aire, _ = COUPLE
+    corps = client.post("/national/ranking", json={"area": aire}).json()
+
+    for rang in corps["ranking"]:
+        attendu = table_nationale.retards(aire, rang["item"])["lag1"]
+        assert rang["last_observed_t_ha"] == pytest.approx(attendu, abs=1e-4)
+
+
+def test_national_ranking_dit_quand_il_n_y_a_rien_a_classer(client,
+                                                            table_nationale):
+    """Un pays à une seule culture ne reçoit pas un classement d'un élément.
+
+    Rendre une liste à un élément sans commentaire laisserait croire à une
+    comparaison. La note dit qu'il n'y en a pas.
+    """
+    seul = next((aire for aire, cultures
+                 in table_nationale.cultures_par_pays().items()
+                 if len(cultures) == 1), None)
+    if seul is None:
+        pytest.skip("aucun pays à culture unique dans la table embarquée")
+
+    corps = client.post("/national/ranking", json={"area": seul}).json()
+
+    assert len(corps["ranking"]) == 1
+    assert "pas de classement" in corps["ranking_note"]
+
+
+def test_national_ranking_refuse_un_pays_inconnu(client):
+    """Un pays hors table est refusé, et le message renvoie à `/national/series`."""
+    reponse = client.post("/national/ranking", json={"area": "Narnia"})
+
+    assert reponse.status_code == 422
+    assert "/national/series" in reponse.json()["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# Le vocabulaire servi
+# --------------------------------------------------------------------------- #
+
+
+def test_national_series_fait_foi_sur_les_couples(client, table_nationale):
+    """La liste publiée est exactement la table embarquée.
+
+    C'est le pendant de `/model/info` pour cette chaîne : l'interface lit ici
+    ce qu'elle propose, au lieu de recopier des pays et des cultures qui
+    finiraient par ne plus correspondre à l'artefact.
+    """
+    corps = client.get("/national/series").json()
+    par_pays = table_nationale.cultures_par_pays()
+
+    assert corps["reference_year"] == PANEL_ANNEE_REFERENCE
+    assert corps["target_year"] == PANEL_ANNEE_PREDITE
+    assert corps["areas_count"] == len(par_pays)
+    assert corps["series_count"] == len(table_nationale.couples_servables_)
+    assert {serie["area"] for serie in corps["areas"]} == set(par_pays)
+
+    premier = corps["areas"][0]
+    assert ([culture["item"] for culture in premier["items"]]
+            == par_pays[premier["area"]])
+
+
+def test_tout_couple_publie_est_servi(client):
+    """Ce que `/national/series` annonce, `/national/predict` l'accepte.
+
+    Un échantillon suffit à éprouver la promesse : les deux routes lisent la
+    même table, et c'est précisément cette unicité qui est vérifiée ici.
+    """
+    series = client.get("/national/series").json()["areas"]
+    echantillon = [series[0], series[len(series) // 2], series[-1]]
+
+    for serie in echantillon:
+        for culture in serie["items"][:2]:
+            reponse = client.post("/national/predict",
+                                  json={"area": serie["area"],
+                                        "item": culture["item"]})
+            assert reponse.status_code == 200, (serie["area"], culture["item"])
+
+
+def test_le_journal_decrit_les_appels_nationaux(client, journal_vide):
+    """Un appel national doit pouvoir être relu dans `/logs`.
+
+    Ce test ferme un défaut que seule l'épreuve du conteneur avait vu :
+    `EntreeJournal.endpoint` énumérait les routes à la main, et `/logs`
+    répondait 500 dès qu'une entrée venait du service national. L'énumération
+    est maintenant dérivée de la liste du middleware ; ce test vérifie le
+    comportement qui en dépend, pas la dérivation.
+    """
+    aire, culture = COUPLE
+    client.post("/national/predict", json={"area": aire, "item": culture})
+    client.post("/national/ranking", json={"area": aire})
+
+    reponse = client.get("/logs?limit=5")
+    assert reponse.status_code == 200
+
+    chemins = [entree["endpoint"] for entree in reponse.json()["entries"]]
+    assert chemins[:2] == ["/national/ranking", "/national/predict"]
+
+
+def test_les_deux_chaines_servent_des_artefacts_distincts(client, national):
+    """Rien ne doit pouvoir servir l'un en croyant charger l'autre.
+
+    Les deux provenances décrivent des registres différents et des contrats
+    d'entrée différents — 8 saisies de parcelle d'un côté, 2 clés de série de
+    l'autre. Les confondre produirait un `columns are missing` au mieux, une
+    prédiction absurde au pire.
+    """
+    parcelle = client.app.state.modele.provenance
+    panel = national.provenance
+
+    assert parcelle["registre"] != panel["registre"]
+    assert parcelle["schema_entree"] != panel["schema_entree"]
+    assert panel["schema_entree"] == "2-saisies"
+    # Les métadonnées propres au service national, que la promotion contrôle.
+    assert panel["annee_predite"] == PANEL_ANNEE_PREDITE
+    assert panel["couples_servables"] > 0

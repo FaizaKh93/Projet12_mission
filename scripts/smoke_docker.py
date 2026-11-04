@@ -1,9 +1,14 @@
 """Éprouve l'image de service dans un conteneur réel.
 
-**Ce que la suite pytest ne peut pas dire.** Les 93 tests tournent dans
+**Ce que la suite pytest ne peut pas dire.** Ses tests tournent dans
 l'environnement de développement : ils ont MLflow, PyArrow et les données sous
 la main. Ils ne prouvent donc rien sur l'autonomie du conteneur, qui n'a ni
 registre, ni `mlflow.db`, ni `mlartifacts/`. C'est l'objet de ce script.
+
+**Deux modèles, deux sceaux.** L'image embarque quatre fichiers : les artefacts
+de parcelle et de panel, et leurs provenances. Les contrôles de refus portent
+donc sur les deux — un sceau vérifié d'un côté et oublié de l'autre laisserait
+servir un artefact national périmé sous une provenance d'emprunt.
 
 Trois familles de contrôles :
 
@@ -49,6 +54,11 @@ BUDGETS = {
     "Maize": {"expected_yield_t_ha": 9.0, "variable_costs_eur_ha": 1100.0,
               "price_eur_t": 267.0},
 }
+
+#: Couple (pays, culture) interrogé sur les routes nationales. Le conteneur
+#: n'a pas les données : ce couple doit donc exister dans la table embarquée
+#: dans l'artefact, et c'est aussi ce que ce contrôle vérifie au passage.
+COUPLE_NATIONAL = {"area": "France", "item": "Wheat"}
 
 #: Paquets qui n'ont rien à faire dans une image de service.
 ABSENTS_ATTENDUS = ("mlflow", "pyarrow", "lightgbm", "optuna", "shap",
@@ -252,6 +262,8 @@ def eprouver_service(image: str) -> None:
         verifier("la réserve dit que les charges manquent",
                  "charges" in reference["caveat"])
 
+        _eprouver_national(port, sante)
+
         statut, journal = appeler(port, "/logs?limit=10")
         verifier("/logs a enregistré les appels, refus compris",
                  statut == 200 and journal["stored"] >= 3,
@@ -262,9 +274,64 @@ def eprouver_service(image: str) -> None:
         nettoyer()
 
 
+def _eprouver_national(port: int, sante: dict) -> None:
+    """Les trois routes du service national, dans le conteneur.
+
+    Le point sensible est la **table de retards** : elle est embarquée dans
+    l'artefact, et le conteneur n'a ni `data/` ni registre pour la reconstituer.
+    Si elle ne voyageait pas avec le modèle, `/national/predict` échouerait ici
+    et nulle part ailleurs.
+    """
+    servi = sante.get("served_model_national", {})
+    verifier("le second modèle est chargé et annoncé",
+             servi.get("source") == "bundled-joblib",
+             f"{servi.get('registry')} v{servi.get('version')}")
+
+    statut, catalogue = appeler(port, "/national/series")
+    verifier("/national/series publie la table embarquée",
+             statut == 200 and catalogue["series_count"] > 0,
+             f"{catalogue['areas_count']} pays, "
+             f"{catalogue['series_count']} couples, "
+             f"{catalogue['reference_year']} -> {catalogue['target_year']}")
+
+    statut, predit = appeler(port, "/national/predict", COUPLE_NATIONAL)
+    verifier("/national/predict rend un rendement et son historique",
+             statut == 200 and len(predit.get("history", [])) == 3,
+             f"{COUPLE_NATIONAL['item']} {predit.get('yield_t_ha')} t/ha "
+             f"pour {predit.get('target_year')}")
+    verifier("l'année prédite est celle qui suit le dernier relevé",
+             predit["target_year"] == predit["reference_year"] + 1
+             == catalogue["target_year"])
+    verifier("la réponse annonce des données réelles",
+             predit["data_quality"]["training_data"] == "real")
+
+    statut, classement = appeler(port, "/national/ranking",
+                                 {"area": COUPLE_NATIONAL["area"]})
+    rendements = [rang["yield_t_ha"] for rang in classement["ranking"]]
+    verifier("/national/ranking trie les cultures du pays",
+             statut == 200 and rendements == sorted(rendements, reverse=True),
+             f"{len(rendements)} cultures, "
+             f"{classement['ranking'][0]['item_fr']} en tête")
+    verifier("le classement se dit non économique",
+             "non par rentabilité" in classement["ranking_note"])
+
+    # Un couple sans historique exploitable doit être refusé, pas servi avec
+    # une imputation : c'est le garde-fou de la table embarquée.
+    try:
+        appeler(port, "/national/predict", {"area": "Narnia", "item": "Wheat"})
+        verifier("un couple hors table est rejeté", False, "accepté")
+    except urllib.error.HTTPError as erreur:
+        verifier("un couple hors table est rejeté", erreur.code == 422,
+                 f"HTTP {erreur.code}")
+
+
 # --------------------------------------------------------------------------- #
 # 3. Refus
 # --------------------------------------------------------------------------- #
+
+#: Les deux artefacts scellés, et le nom de la chaîne qu'ils servent.
+ARTEFACTS_SCELLES = (("modele_api.joblib", "parcelle"),
+                     ("modele_api_panel.joblib", "service national"))
 
 
 def eprouver_refus(image: str) -> None:
@@ -273,31 +340,38 @@ def eprouver_refus(image: str) -> None:
     Le conteneur est relancé avec un `.joblib` substitué par un montage. Si
     l'API démarrait quand même, elle servirait un modèle en annonçant la
     provenance d'un autre — précisément ce que le sceau existe pour empêcher.
+
+    **Les deux artefacts y passent.** Le démarrage charge le modèle de parcelle
+    avant celui du panel : si seul le premier était éprouvé, un sceau oublié
+    sur le second ne se verrait jamais, puisque l'échec du premier masquerait
+    tout.
     """
     titre("3. Refus — un artefact substitué doit bloquer le démarrage")
 
-    nettoyer()
-    with tempfile.TemporaryDirectory() as dossier:
-        imposteur = Path(dossier) / "modele_api.joblib"
-        # Un contenu arbitraire : le sceau est vérifié **avant** le chargement,
-        # donc ce fichier n'a pas besoin d'être un pickle valide.
-        imposteur.write_bytes(b"ceci n'est pas l'artefact promu")
+    for fichier, chaine in ARTEFACTS_SCELLES:
+        nettoyer()
+        with tempfile.TemporaryDirectory() as dossier:
+            imposteur = Path(dossier) / fichier
+            # Un contenu arbitraire : le sceau est vérifié **avant** le
+            # chargement, donc ce fichier n'a pas besoin d'être un pickle
+            # valide.
+            imposteur.write_bytes(b"ceci n'est pas l'artefact promu")
 
-        acheve = docker(
-            "run", "--rm", "--name", CONTENEUR,
-            "-v", f"{imposteur}:/app/models/modele_api.joblib:ro", image)
-        sortie = acheve.stdout + acheve.stderr
+            acheve = docker(
+                "run", "--rm", "--name", CONTENEUR,
+                "-v", f"{imposteur}:/app/models/{fichier}:ro", image)
+            sortie = acheve.stdout + acheve.stderr
 
-        verifier("le démarrage échoue", acheve.returncode != 0,
-                 f"code {acheve.returncode}")
-        verifier("le message nomme l'artefact fautif",
-                 "n'est pas l'artefact décrit" in sortie)
-        verifier("les deux empreintes sont affichées",
-                 "attendue" in sortie and "constatée" in sortie)
+            verifier(f"{chaine} : le démarrage échoue", acheve.returncode != 0,
+                     f"code {acheve.returncode}")
+            verifier(f"{chaine} : le message nomme l'artefact fautif",
+                     f"{fichier} n'est pas l'artefact décrit" in sortie)
+            verifier(f"{chaine} : les deux empreintes sont affichées",
+                     "attendue" in sortie and "constatée" in sortie)
 
-        if echecs and "le démarrage échoue" in echecs:
-            print("\n  --- sortie du conteneur ---")
-            print("  " + "\n  ".join(sortie.strip().splitlines()[-12:]))
+            if any(fichier in echec or chaine in echec for echec in echecs):
+                print("\n  --- sortie du conteneur ---")
+                print("  " + "\n  ".join(sortie.strip().splitlines()[-12:]))
 
 
 # --------------------------------------------------------------------------- #

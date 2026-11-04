@@ -1,0 +1,28 @@
+{
+ "registre": "agritech-rendement-panel-api",
+ "version": 2,
+ "alias": "champion",
+ "modele": "ridge",
+ "registre_source": "agritech-rendement-panel",
+ "version_source": "3",
+ "run_source": "73c0ecd9a6a94943a25087697177d415",
+ "schema_entree": "2-saisies",
+ "data_version": "73ba4ab01cea",
+ "split_version": "61277baafb1d",
+ "hypotheses_economiques": "v1-2026-10",
+ "sklearn_version": "1.9.1",
+ "pandas_version": "3.0.6",
+ "numpy_version": "2.5.4",
+ "artefact_sha256": "50b125821ab1634d1af5f7e37300409092b0d0d92e2b466fc78517379667d4b3",
+ "annee_reference": 2016,
+ "annee_predite": 2017,
+ "couples_servables": 1106,
+ "saisies_obligatoires": [
+  "Area",
+  "Item"
+ ],
+ "saisies_facultatives": [],
+ "exporte_le": "2026-11-03T17:18:49+00:00",
+ "alias_precedent": null,
+ "promu_le": "2026-11-03T17:19:01+00:00"
+}

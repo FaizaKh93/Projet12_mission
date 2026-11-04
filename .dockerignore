@@ -17,11 +17,14 @@ mlartifacts/
 mlflow.db
 mlflow.db-journal
 
-# Tous les modèles sauf les deux que l'API sert. `modele_final.joblib` est le
-# modèle d'entraînement, inutile ici ; les autres vont jusqu'à 1,3 Mo.
+# Tous les modèles sauf les quatre que l'API sert : les deux artefacts de
+# service et leurs provenances. `modele_final.joblib` est le modèle
+# d'entraînement, inutile ici ; les autres vont jusqu'à 1,3 Mo.
 models/*
 !models/modele_api.joblib
 !models/modele_api.json
+!models/modele_api_panel.joblib
+!models/modele_api_panel.json
 
 # --- Environnements ---------------------------------------------------------#
 # Un venv est lié à sa plateforme : celui de Windows ne fonctionnerait pas dans

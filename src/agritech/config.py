@@ -229,6 +229,20 @@ PANEL_COLUMNS = PANEL_KEYS + PANEL_FEATURES + PANEL_COVARIATES + [PANEL_TARGET]
 #: la MAE de 25 %. Ces bornes donnent 71,1 / 14,4 / 14,5 % des lignes.
 PANEL_SPLIT_BOUNDS = {"fin_train": 2002, "fin_val": 2009}
 
+#: Dernière année du panel, et seule base possible d'une prévision.
+#:
+#: Les retards servis pour l'année suivante sont **décalés d'un cran** par
+#: rapport à la ligne de cette année : `lag1` est son rendement observé, `lag2`
+#: et `lag3` ses deux premiers retards. Le transformateur de service les
+#: reconstitue ainsi, et un contrôle de l'export vérifie l'égalité exacte avec
+#: les retards que le dataset porte pour l'année suivante.
+PANEL_ANNEE_REFERENCE = 2016
+
+#: L'année que le service prédit. **Pas l'année en cours** : une interface qui
+#: présenterait cette valeur comme une prévision de la campagne actuelle
+#: mentirait sur ce que le panel contient. Chaque réponse l'annonce.
+PANEL_ANNEE_PREDITE = PANEL_ANNEE_REFERENCE + 1
+
 # --------------------------------------------------------------------------- #
 # Variables du modèle de panel
 #
@@ -309,6 +323,12 @@ REGISTERED_MODEL_API = "agritech-rendement-api"
 EXPERIMENT_PANEL = "agritech-rendement-panel"
 REGISTERED_MODEL_PANEL = "agritech-rendement-panel"
 
+# Et, pour la même raison qu'en V1, l'artefact **de service** de cette chaîne
+# est publié sous un quatrième nom : il n'attend que le pays et la culture, le
+# transformateur reconstituant les retards. Quatre noms au registre, donc, et
+# quatre contrats d'entrée stables, chacun avec son propre alias `champion`.
+REGISTERED_MODEL_PANEL_API = "agritech-rendement-panel-api"
+
 # MLflow 3 a supprimé les *stages* (`Staging`, `Production`) au profit des
 # **alias**. Déplacer un alias suffit à changer ce qu'il désigne, sans toucher
 # au code qui le charge ni redéployer quoi que ce soit.
@@ -334,6 +354,14 @@ API_MODEL_PATH = MODELS_DIR / "modele_api.joblib"
 # C'est la source de `/model/info` quand le modèle ne vient pas du registre.
 API_METADATA_PATH = MODELS_DIR / "modele_api.json"
 
+# L'artefact de service de la chaîne `real`, et sa provenance. Deux fichiers de
+# plus, et non une variante des précédents : les deux artefacts n'attendent pas
+# les mêmes saisies — le pays et la culture ici, les huit champs de parcelle
+# là — et rien ne doit pouvoir servir l'un en croyant charger l'autre. L'image
+# embarque les quatre fichiers, chacun scellé par sa propre empreinte.
+API_PANEL_MODEL_PATH = MODELS_DIR / "modele_api_panel.joblib"
+API_PANEL_METADATA_PATH = MODELS_DIR / "modele_api_panel.json"
+
 # Demi-largeur de l'**intervalle de prédiction** à 95 % — l'intervalle qui doit
 # couvrir le rendement d'une parcelle nouvelle, et non un intervalle de
 # confiance autour d'une moyenne : les deux ne mesurent pas la même chose.
@@ -354,6 +382,58 @@ API_METADATA_PATH = MODELS_DIR / "modele_api.json"
 # devrait être recalibré, et la normalité parfaite des résidus ne s'y
 # observerait pas.
 DEMI_INTERVALLE_PREDICTION_95_T_HA = 0.979
+
+# --------------------------------------------------------------------------- #
+# Intervalle empirique du service national
+#
+# La chaîne `real` ne peut pas reprendre la demi-largeur unique ci-dessus. Son
+# écart-type de résidu va de 0,24 à 2,95 t/ha du premier au dernier décile de
+# rendement : mesuré en conditions de service, un intervalle absolu couvre
+# 100 % en bas de gamme et **76 % au dernier décile**, et son taux global de
+# 94,73 % cache entièrement cette dérive.
+#
+# D'où deux jeux de bornes, calibrés sur `val` dans les conditions exactes du
+# service — entrée réduite au couple (pays, culture), covariables de l'année
+# cible imputées par la médiane de `train` :
+#
+#   - des quantiles **relatifs** à la prédiction, qui suivent le niveau ;
+#   - un **plancher absolu**, calibré sur les 664 lignes de `val` sous 1 t/ha,
+#     qui élargit l'intervalle là où le relatif devient trop étroit. Sans lui,
+#     la couverture tombe à 76,8 % sous 0,5 t/ha.
+#
+# L'intervalle servi est l'union des deux, et la borne basse est tronquée à
+# zéro. Il reste **plus étroit** que l'absolu seul : 4,08 contre 5,38 t/ha de
+# largeur médiane, et 0,94 contre 3,43 t/ha sous 0,5 t/ha.
+#
+# **Ce que ces bornes ne sont pas.** Une garantie de 95 % sur une prédiction
+# donnée. Ce sont des quantiles empiriques de résidus passés, asymétriques
+# parce que les résidus le sont : le modèle reconduit la trajectoire récente et
+# sous-estime plus souvent qu'il ne surestime, sur des rendements qui croissent.
+#
+# **Réserve de méthode.** Les bornes ne viennent que de `val`. Le choix de la
+# méthode, lui, s'est appuyé sur la couverture observée sur `test` : sur ce
+# point précis, `test` n'est plus un jeu entièrement aveugle. Le choix du
+# modèle, lui, n'en dépend pas — il était arrêté sur `val`.
+PANEL_INTERVALLE_RELATIF_95 = (-0.373, 0.501)
+PANEL_INTERVALLE_PLANCHER_95_T_HA = (-0.361, 0.579)
+
+#: Plancher de la prédiction qui sert de base au calcul relatif : un
+#: pourcentage d'une valeur quasi nulle ne veut plus rien dire. Partagé par la
+#: calibration et par le service, sans quoi les bornes mesurées ne seraient pas
+#: celles appliquées. En pratique il ne mord jamais — la plus petite prédiction
+#: observée sur `test` vaut 0,148 t/ha.
+PANEL_PREDICTION_MINIMALE_T_HA = 0.1
+
+#: Couvertures constatées sur `test`, que `/model/info` expose avec le niveau
+#: nominal. Annoncer 95 % sans le taux mesuré laisserait croire à une garantie ;
+#: les deux extrêmes par culture disent en plus que l'erreur n'est pas homogène.
+PANEL_COUVERTURE_MESUREE = {
+    "globale": 0.9667,
+    "pire_decile": 0.94,
+    "sous_0_5_t_ha": 0.96,
+    "par_culture_min": 0.907,   # sorgho
+    "par_culture_max": 0.989,   # plantain
+}
 
 # Seuil au-dessous duquel un écart de rendement entre cultures n'est pas
 # exploitable pour décider. C'est une **convention métier annoncée**, pas un
@@ -470,6 +550,26 @@ CULTURES_EN_FRANCAIS = {
     "Rice": "Riz",
     "Soybean": "Soja",
     "Wheat": "Blé",
+}
+
+#: Noms français des dix cultures du panel. Table distincte de la précédente,
+#: et non une extension : les deux vocabulaires ne se recouvrent qu'en partie
+#: et les libellés FAO portent leur propre précision — « Rice, paddy » est du
+#: riz **paddy**, non usiné, ce que « Riz » tairait.
+#:
+#: Les 204 pays, eux, restent sous leur nom FAO : les traduire demanderait une
+#: dépendance de plus pour un gain nul, et l'interface annonce la source.
+CULTURES_PANEL_EN_FRANCAIS = {
+    "Cassava": "Manioc",
+    "Maize": "Maïs",
+    "Plantains and others": "Plantains et assimilés",
+    "Potatoes": "Pomme de terre",
+    "Rice, paddy": "Riz paddy",
+    "Sorghum": "Sorgho",
+    "Soybeans": "Soja",
+    "Sweet potatoes": "Patate douce",
+    "Wheat": "Blé",
+    "Yams": "Igname",
 }
 
 

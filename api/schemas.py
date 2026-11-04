@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agritech.config import DOMAINE_ENTRAINEMENT, MODALITES_CATEGORIELLES
 from agritech.preprocessing import FEATURES_SAISIES
+from api.journal import CHEMINS_JOURNALISES
 
 #: Du champ JSON vers la variable du modèle. **Dérivée, pas écrite** : une
 #: table recopiée à la main serait un endroit de plus où une divergence peut
@@ -515,7 +516,17 @@ class EntreeJournal(BaseModel):
 
     timestamp: str = Field(
         ..., description="Date de l'appel, UTC, au format ISO 8601.")
-    endpoint: Literal["/predict", "/recommend"]
+    request_id: str = Field(
+        ..., description="Identifiant court de l'appel. Le même figure dans "
+                         "la ligne émise sur la sortie standard, que "
+                         "l'hébergeur conserve : c'est par lui qu'on relie "
+                         "un incident vu dans les logs à la requête "
+                         "complète, corps compris.")
+    # **Dérivée, pas écrite.** Le middleware décide quelles routes il
+    # journalise ; une liste recopiée ici ferait échouer `/logs` en 500 dès
+    # qu'une route s'ajoute là-bas — c'est arrivé à l'ouverture du service
+    # national, et seule l'épreuve du conteneur l'a vu.
+    endpoint: Literal[CHEMINS_JOURNALISES]
     status_code: int
     duration_ms: float = Field(
         ..., description="Durée du traitement complet, middleware compris.")
@@ -606,3 +617,213 @@ class PrixReferenceReponse(BaseModel):
     source: SourcePrixReference
     caveat: str = Field(
         ..., description="Ce que ces prix ne disent pas, en clair.")
+
+
+# --------------------------------------------------------------------------- #
+# Service national — la seconde chaîne
+#
+# Regroupés ici plutôt que mêlés aux schémas de parcelle, parce que ce n'est
+# pas une variante du même contrat : l'unité d'observation change. Une réponse
+# de `/predict` décrit une parcelle dans des conditions données ; une réponse
+# de `/national/predict` décrit **un pays, une culture, une année**. Aucun
+# champ n'est partageable entre les deux en dehors des blocs de provenance.
+#
+# Ni pays ni culture ne sont des `Literal` dérivés de `config` : ils viennent
+# de la table embarquée dans l'artefact, qui seule sait quelles séries ont un
+# historique exploitable. Le contrat renvoie donc vers `/national/series`, et
+# le service refuse en 422 un couple absent — là où la V1 peut énumérer six
+# cultures dans son schéma.
+# --------------------------------------------------------------------------- #
+
+
+class PredictionNationaleRequete(BaseModel):
+    """`/national/predict` — un pays, une culture, et rien d'autre.
+
+    **Aucune condition de culture n'est demandée, et c'est un choix mesuré.**
+    Les trois covariables du panel pèsent 1,1 % de la décomposition SHAP, et
+    elles portent sur l'année à prédire, donc inconnues avant la récolte. Les
+    faire saisir produirait une interface qui *semble* répondre aux conditions
+    sans le faire : la prédiction bougerait d'un centième de tonne.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    area: str = Field(
+        ..., min_length=1, examples=["France"],
+        description="Pays, sous son nom FAO. La liste faisant foi est celle "
+                    "que `/national/series` renvoie : c'est la table "
+                    "embarquée dans l'artefact qui la porte.")
+    item: str = Field(
+        ..., min_length=1, examples=["Wheat"],
+        description="Culture, sous son libellé FAO — « Rice, paddy » et non "
+                    "« Rice ». Les cultures disponibles varient d'un pays à "
+                    "l'autre : de 1 à 10 selon son historique.")
+
+
+class ClassementNationalRequete(BaseModel):
+    """`/national/ranking` — un pays, toutes les cultures qu'il a cultivées."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    area: str = Field(
+        ..., min_length=1, examples=["France"],
+        description="Pays dont on classe les cultures. Seules celles qui "
+                    "ont un historique national exploitable sont comparées : "
+                    "proposer une culture jamais cultivée placerait le "
+                    "plantain deuxième en France.")
+
+
+class IntervalleEmpirique(BaseModel):
+    """Intervalle **empirique** de prédiction, et non une garantie à 95 %.
+
+    **Quatre nombres, aucun texte.** La méthode et la réserve sont ici, lues
+    une fois ; les répéter dans la réponse les recopierait à chaque culture du
+    classement. Ce qui change la lecture du chiffre — la couverture n'est pas
+    garantie par prédiction — voyage malgré tout dans chaque réponse, en une
+    ligne de `data_quality`.
+
+    **Méthode.** Deux jeux de quantiles de résidus calibrés sur `val`, dans
+    les conditions exactes du service : des bornes **relatives** à la
+    prédiction (−37,3 % / +50,1 %), qui suivent le niveau, élargies au besoin
+    par un **plancher absolu** (−0,361 / +0,579 t/ha) calibré sur les lignes
+    sous 1 t/ha. Le relatif seul tombe à 76,8 % de couverture sous 0,5 t/ha ;
+    un intervalle absolu unique, lui, couvre 100 % en bas de gamme et 76 % au
+    dernier décile.
+
+    **Portée.** `measured_coverage` est la couverture constatée sur `test`,
+    qui n'entre dans aucun calibrage, et elle est **globale** : de 94 % à 98 %
+    selon le décile de prédiction, et de 90,7 % (sorgho) à 98,9 % (plantain)
+    selon la culture. L'intervalle est asymétrique parce que les résidus le
+    sont — le modèle reconduit la trajectoire récente et sous-estime plus
+    souvent qu'il ne surestime.
+    """
+
+    lower_t_ha: float = Field(
+        ..., description="Borne basse, tronquée à zéro : un rendement ne peut "
+                         "être négatif.")
+    upper_t_ha: float
+    nominal_coverage: float = Field(0.95, description="Niveau visé.")
+    measured_coverage: float = Field(
+        ..., description="Couverture constatée sur le jeu de test, globale.")
+
+
+class RendementObserve(BaseModel):
+    """Un rendement national effectivement relevé, avec son année.
+
+    Rendu avec chaque prédiction, et pas par souci de transparence
+    décorative : le modèle est une moyenne pondérée des trois dernières
+    années. Sur une série accidentée, sa sortie s'écarte beaucoup du dernier
+    relevé — le soja de Zambie passe de 0,19 à 0,81 t/ha — et seul
+    l'historique affiché rend ce saut lisible.
+    """
+
+    year: int
+    yield_t_ha: float
+
+
+class PredictionNationaleReponse(BaseModel):
+    """Le rendement national attendu pour l'année suivant le dernier relevé.
+
+    **Ce n'est pas une prévision de la campagne en cours.** Le panel FAO
+    s'arrête à son année de référence ; `target_year` est la seule année que
+    ce modèle puisse prédire, et elle est annoncée pour qu'aucune interface ne
+    puisse présenter ce chiffre comme celui d'aujourd'hui.
+    """
+
+    area: str
+    item: str
+    reference_year: int = Field(
+        ..., description="Dernière année observée du panel.")
+    target_year: int = Field(
+        ..., description="L'année prédite : la suivante, et aucune autre.")
+    yield_t_ha: float = Field(
+        ..., description="Rendement national estimé, en tonnes par hectare.")
+    prediction_interval_95: IntervalleEmpirique
+    history: list[RendementObserve] = Field(
+        ..., description="Les trois rendements qui ont servi à la prédiction, "
+                         "du plus récent au plus ancien.")
+    data_quality: QualiteDonnees
+    served_model: ServedModel
+
+
+class RendementNational(BaseModel):
+    """Le rendement attendu d'une culture du pays, avec son dernier relevé."""
+
+    item: str
+    item_fr: str = Field(
+        ..., description="Libellé français, rendu par l'API pour qu'une "
+                         "interface n'ait pas à tenir sa propre table.")
+    yield_t_ha: float
+    prediction_interval_95: IntervalleEmpirique
+    last_observed_t_ha: float = Field(
+        ..., description="Rendement relevé l'année de référence. Comparer les "
+                         "deux montre ce que le modèle reconduit.")
+
+
+class ClassementNationalReponse(BaseModel):
+    """Les cultures du pays, classées par rendement estimé.
+
+    **Un classement par rendement, pas par rentabilité.** Le mot « rentable »
+    appellerait une marge, donc des prix : il en manque six sur dix pour ces
+    cultures, et sur les quatre tarifées l'ordre change entre les tonnes et la
+    valeur — le soja passe devant le blé. Ce que cette réponse autorise à
+    dire : « dans ce pays, ces cultures ont historiquement les meilleurs
+    rendements ». Ce qu'elle n'autorise pas : « compte tenu de vos
+    conditions, plantez ceci ».
+
+    **Le classement ne dépend pas des conditions**, puisqu'aucune n'est
+    saisie : il reflète le niveau historique de chaque culture dans ce pays.
+    L'écart entre la première et la dernière atteint 15,35 t/ha, mais il tient
+    presque entièrement au niveau de la culture — une pomme de terre rend dix
+    fois plus qu'un soja, et aucun modèle n'est nécessaire pour l'apprendre.
+    """
+
+    area: str
+    reference_year: int
+    target_year: int
+    ranking: list[RendementNational]
+    ranking_note: str = Field(
+        ..., description="La portée de ce classement, et ce qu'il n'établit "
+                         "pas.")
+    economic_note: str = Field(
+        ..., description="Pourquoi aucune marge n'accompagne ce classement.")
+    data_quality: QualiteDonnees
+    served_model: ServedModel
+
+
+class CultureDisponible(BaseModel):
+    """Une culture servable, dans les deux langues du projet."""
+
+    item: str
+    item_fr: str
+
+
+class SerieNationale(BaseModel):
+    """Un pays et les cultures dont il a un historique exploitable."""
+
+    area: str
+    items: list[CultureDisponible]
+
+
+class SeriesNationalesReponse(BaseModel):
+    """Le vocabulaire du service national : ce qu'il sait prédire.
+
+    C'est l'équivalent de `/model/info` pour cette chaîne, et sa raison
+    d'être est la même : une interface qui recopierait la liste des pays et
+    des cultures finirait par proposer un couple que l'artefact ne connaît
+    pas. La table embarquée fait foi.
+
+    Les couples absents ne sont pas une omission : une série interrompue avant
+    l'année de référence ne permet pas de prévoir l'année suivante — son
+    dernier relevé ne serait pas celui de l'an dernier.
+    """
+
+    reference_year: int
+    target_year: int
+    areas: list[SerieNationale]
+    areas_count: int
+    series_count: int = Field(
+        ..., description="Nombre de couples (pays, culture) servables.")
+    served_model: ServedModel
+    caveat: str = Field(
+        ..., description="La portée du service, en une phrase.")

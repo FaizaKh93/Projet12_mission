@@ -75,11 +75,19 @@ WORKDIR /app
 # shebangs et `pyvenv.cfg` qu'il contient y sont inscrits en dur.
 COPY --from=constructeur --chown=agritech:agritech /app/.venv /app/.venv
 
-# Le code, puis l'artefact. Dans cet ordre : le modèle change plus souvent que
-# le code du service, donc il occupe la dernière couche.
+# Le code, puis les artefacts. Dans cet ordre : les modèles changent plus
+# souvent que le code du service, donc ils occupent la dernière couche.
+#
+# **Quatre fichiers, et les quatre sont exigés** : deux artefacts de service et
+# leurs provenances. L'API refuse de démarrer si l'un manque, plutôt que de
+# servir une moitié de contrat — un `COPY` incomplet est une erreur de
+# construction, pas une fonctionnalité désactivée. 61 Ko au total.
 COPY --chown=agritech:agritech src/ /app/src/
 COPY --chown=agritech:agritech api/ /app/api/
-COPY --chown=agritech:agritech models/modele_api.joblib models/modele_api.json /app/models/
+COPY --chown=agritech:agritech \
+    models/modele_api.joblib models/modele_api.json \
+    models/modele_api_panel.joblib models/modele_api_panel.json \
+    /app/models/
 
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONPATH="/app/src:/app" \
