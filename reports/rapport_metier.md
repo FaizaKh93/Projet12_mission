@@ -2,6 +2,8 @@
 
 *Ce document présente les résultats de l'étude et ce qu'on peut en faire. Il se lit sans connaissance technique. Le détail de la méthode figure dans le rapport technique.*
 
+**L'application est en ligne** : <https://agritech-answers.streamlit.app> — rien à installer. Elle est hébergée sur une offre gratuite : si personne ne s'en est servi depuis un quart d'heure, le premier écran met environ une minute à s'afficher, le temps que le service se réveille.
+
 ---
 
 ## En bref
@@ -21,11 +23,13 @@
 
 L'application pose huit questions sur la parcelle — la pluviométrie de la saison, la température moyenne, si elle est fertilisée, si elle est irriguée, la culture envisagée, et trois caractéristiques facultatives : la région, le type de sol et la condition météo dominante.
 
-Elle répond de deux façons.
+Elle répond de trois façons.
 
 **Le rendement attendu** d'une culture, avec la fourchette dans laquelle il devrait tomber.
 
 **La comparaison des six cultures**, sur leur rendement d'abord, puis sur leur marge brute dès que les charges sont renseignées.
+
+**Le rendement d'un pays**, pour une culture donnée — une réponse d'une autre nature, détaillée plus bas.
 
 > **L'application ne prévoit pas la météo.** Elle répond à la question « *si la saison apporte cette pluie et cette température, quel rendement attendre ?* ». C'est un simulateur de scénario, pas une prévision de récolte. Au moment de semer, vous ne connaissez pas la pluviométrie de la saison à venir : l'usage prévu est d'essayer plusieurs hypothèses — une saison sèche, une saison normale, une saison humide — et de voir ce que chacune donnerait.
 
@@ -34,6 +38,16 @@ Elle répond de deux façons.
 *Les six barres de gauche sont les rendements estimés : elles sont égales à deux centièmes près. Les barres de droite sont les marges. Même parcelle, même estimation — c'est l'économie qui sépare les cultures.*
 
 > **Ce que montre cette capture : l'état de départ.** Hypothèses : prix FAOSTAT, **rendement du modèle appliqué aux six cultures** — 6,39 t/ha — et charges d'exemple de l'interface. Que le modèle estime presque le même rendement pour les six est une limite de ce qu'il a appris sur des données simulées : ce n'est pas un rendement de référence par culture, et cela ne doit pas servir d'hypothèse de budget. Dès que vous déclarez le rendement que vous attendez réellement de chaque culture, les marges changent d'échelle et parfois d'ordre — c'est ce que montre la figure du **Résultat 3**, construite sur d'autres hypothèses.
+
+### Un troisième écran : les rendements d'un pays
+
+L'application sert aussi un **second modèle**, appris celui-là sur des rendements **réellement observés** — ceux que la FAO publie chaque année pour 204 pays. Il répond à une autre question : quel rendement ce pays obtient-il, et vers quoi va-t-il ?
+
+![Le rendement national d'une culture, replacé dans son historique](figures/app_mode_national.png)
+
+*Le maïs en France. Le chiffre de gauche est l'estimation pour l'année suivante ; la courbe de droite montre les trois dernières années observées, et c'est elle qui l'explique — le modèle prolonge une tendance, il ne devine pas une récolte. En bas, les cultures du pays classées par rendement estimé : contrairement aux six cultures de la parcelle, celles-ci se départagent nettement.*
+
+> **Un pays n'est pas une parcelle.** Ce second modèle ne dit rien de votre champ : il décrit une moyenne nationale, toutes exploitations confondues, et l'année qu'il estime est celle qui suit le dernier relevé disponible — pas la campagne en cours. Les deux écrans ne se remplacent donc pas, et comparer leurs chiffres n'aurait pas de sens. Son intérêt est ailleurs : il repose sur des rendements observés, là où tout le reste de ce document s'appuie sur des données simulées.
 
 ---
 

@@ -104,7 +104,7 @@ Ce constat ne prouve pas qu'aucun effet cultural n'existe en agriculture réelle
 
 ## 5. La démarche d'optimisation
 
-Chaque modèle a été réglé automatiquement par une recherche d'hyperparamètres — l'équivalent du réglage fin d'un instrument. **305 expérimentations** ont été enregistrées et horodatées dans MLflow, le journal de bord du projet.
+Chaque modèle a été réglé automatiquement par une recherche d'hyperparamètres — l'équivalent du réglage fin d'un instrument. **308 expérimentations** ont été enregistrées et horodatées dans MLflow, le journal de bord du projet.
 
 | Élément | Détail |
 |---|---|
@@ -116,6 +116,14 @@ Chaque modèle a été réglé automatiquement par une recherche d'hyperparamèt
 ![Convergence de l'optimisation](figures/optimisation_optuna.png)
 
 *À gauche, la meilleure erreur atteinte au fil des essais : les courbes s'aplatissent bien avant le centième, le budget de recherche était suffisant. À droite, la dispersion des essais montre ce que le réglage change réellement.*
+
+![Les deux expériences du projet, dans le journal MLflow](figures/mlflow_experiences.png)
+
+*Le journal de bord tel qu'il se consulte. **Deux expériences distinctes** y cohabitent : `agritech-rendement` pour la chaîne des parcelles simulées, `agritech-rendement-panel` pour celle du panel FAO. Elles ne partagent ni données, ni variables, ni découpage — les séparer évite de comparer par mégarde deux erreurs qui ne portent pas sur la même chose.*
+
+![Les quatre modèles comparés sur le même jeu de validation](figures/mlflow_runs_metriques.png)
+
+*Les quatre modèles, triés par RMSE de validation. Les trois modèles entraînés se tiennent en six millièmes de tonne — 0,5004 à 0,5010 t/ha — tandis que la référence `dummy`, qui prédit toujours la moyenne, atteint 1,6985 : trois fois pire. C'est cet écart qui établit que les modèles apprennent quelque chose, et le resserrement des trois premiers qui établit qu'aucun n'apprend davantage que la régression. **Le R² de la référence vaut −0,000038**, et non −3,79 : la colonne tronque une notation scientifique, `-3.79...e-05`. Prédire la moyenne explique exactement zéro pour cent de la variance — c'est la définition d'une baseline, et la retrouver confirme que le protocole d'évaluation ne se trompe pas.*
 
 La reproductibilité est assurée par des graines aléatoires fixées à chaque étape — découpage des données, échantillonnage des hyperparamètres, entraînement. **Relancer la chaîne redonne exactement les mêmes résultats.**
 
@@ -146,7 +154,7 @@ La reproductibilité est assurée par des graines aléatoires fixées à chaque 
 | **Modèle final** | `modele_final.joblib` — 5 Ko, réponse en 3 ms, rechargement vérifié |
 | Pipeline d'entraînement | `scripts/train.py` et le module `agritech` — préparation, optimisation, évaluation |
 | Notebook de comparaison | Évaluation des quatre modèles, analyse des variables, décision argumentée |
-| Journal des expérimentations | 305 runs MLflow, métriques et paramètres complets |
+| Journal des expérimentations | 308 runs MLflow, métriques et paramètres complets |
 | Figures | Performance, leviers, optimisation, analyse par culture |
 
 Le modèle retenu est **la régression linéaire régularisée**, choisie sur cinq critères qu'elle remporte — meilleure erreur, écart statistiquement établi avec le suivant, temps de réponse le plus court, fichier le plus léger, coefficients directement lisibles — le sixième, la régularité du comportement d'une culture à l'autre, ne départageant aucun des trois modèles.

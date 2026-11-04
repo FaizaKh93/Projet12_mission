@@ -39,7 +39,7 @@ La raison n'est pas esthétique. Recopier ces valeurs créerait un second endroi
 
 ---
 
-## 3. Les deux parcours
+## 3. Les trois parcours
 
 ### 3.1 Prédiction — une culture, un rendement, une fourchette
 
@@ -66,6 +66,18 @@ Les deux panneaux — rendement à gauche, marge à droite — partagent un **or
 ![Le mode Recommandation : les six rendements à gauche, les six marges à droite](figures/app_mode_recommandation.png)
 
 *Capture de l'application en fonctionnement. **Les six barres de gauche sont égales à deux centièmes près** — 6,39 t/ha partout, 6,40 pour l'orge : le rendement ne départage rien. Les marges de droite, elles, s'étalent de 907 à 2 326 €/ha, et c'est la saisie des charges qui produit cet écart. Sous chaque graphique, la légende rappelle l'échelle retenue, pour que la capture reste lisible hors de l'écran.*
+
+### 3.3 Rendements nationaux — un pays, une culture, l'année suivante
+
+Ce troisième mode interroge le **second modèle**, celui du panel FAO. Il n'affiche **aucun formulaire de parcelle**, et c'est la décision structurante de l'écran : ce modèle ne lit ni la pluie ni la température, et montrer ces curseurs laisserait croire qu'ils comptent. Un bandeau annonce d'emblée ce qui change — des rendements nationaux, pas parcellaires, et l'année prédite, qui est celle qui suit le dernier relevé disponible et non la campagne en cours.
+
+Les pays et les cultures ne sont pas écrits dans l'interface : ils viennent de `GET /national/series`. Recopier 204 pays et leurs cultures créerait un second endroit où une divergence peut s'installer, et l'écran finirait par proposer un couple que l'artefact ne sait pas prédire.
+
+Le graphique est **celui qui explique le modèle**. Il montre les trois derniers relevés, puis la prévision et son intervalle. Un chiffre seul se lirait comme une mesure de l'année à venir ; la suite des points rend visible ce que le modèle fait réellement — il prolonge une trajectoire. Les années sont traitées en catégories et non en quantités : quatre points sur un axe continu produiraient des graduations décimales, et « 2016,5 » ne désigne rien.
+
+![Le mode Rendements nationaux : la prévision à gauche, la trajectoire qui la produit à droite, le classement du pays en dessous](figures/app_mode_national.png)
+
+*Capture de l'application en fonctionnement. La barre latérale porte les deux provenances — le modèle de parcelle et celui du panel —, car deux modèles servis demandent deux estampilles. En bas, le classement des cultures du pays : la barre verte est le rendement estimé, le point noir le dernier rendement relevé. Quand le point tombe loin de la barre, la série est accidentée et le modèle revient vers sa moyenne.*
 
 ---
 
@@ -158,11 +170,11 @@ Cette lecture apporte deux constats qui dépassent la question posée.
 - **au-dessus**, les fonctions HTTP — elles ignorent qu'une interface existe et se testent sans Streamlit ;
 - **en dessous**, l'affichage.
 
-C'est cette frontière qui rend les tests possibles sans second fichier. Le groupe de dépendances `ui` est lui aussi **disjoint du groupe `api`** : le front n'importe ni FastAPI ni le modèle, et les deux pourront donc être déployés séparément.
+C'est cette frontière qui rend les tests possibles sans second fichier. Le groupe de dépendances `ui` est lui aussi **disjoint du groupe `api`** : le front n'importe ni FastAPI ni le modèle. Les deux sont effectivement déployés séparément — l'interface sur Streamlit Community Cloud, le service en conteneur sur Render —, et leur seul lien est une adresse.
 
-L'adresse du service se règle par la variable d'environnement `AGRITECH_API_URL`. Sans elle, l'application vise `http://localhost:8000` ; dans un `docker compose`, elle visera `http://api:8000`. C'est le point d'entrée prévu pour l'étape 5.
+Cette adresse se règle par la variable d'environnement `AGRITECH_API_URL`. Sans elle, l'application vise `http://localhost:8000` ; en ligne, elle vise le service hébergé. Deux autres variables règlent l'attente, parce qu'un hébergement gratuit met le service en veille : le délai d'un appel et le nombre d'essais.
 
-**Quand l'API ne répond pas**, l'écran dit quoi faire plutôt que d'afficher une trace : délai dépassé, service injoignable avec la commande de démarrage, ou champ refusé — dans ce dernier cas l'application nomme le champ en cause au lieu de recracher le JSON de validation.
+**Quand l'API ne répond pas**, l'écran dit quoi faire plutôt que d'afficher une trace. Le conseil dépend de l'adresse visée : la commande de démarrage du conteneur si elle est locale, un bouton *Réessayer* si elle ne l'est pas — devant un service en veille, redemander est la seule action utile. Un champ refusé est nommé au lieu de recracher le JSON de validation.
 
 ---
 

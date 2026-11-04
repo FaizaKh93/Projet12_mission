@@ -59,8 +59,9 @@ JOURNAL: deque[dict] = deque(maxlen=CAPACITE)
 AVERTISSEMENT = (
     "Journal en mémoire du processus : perdu au redémarrage, et propre à "
     "chaque worker — `uvicorn --workers N` en tient N séparés. Ce n'est pas "
-    "un journal d'audit. Aucune authentification ne protège cette route, qui "
-    "expose les budgets transmis à /recommend : ne pas l'ouvrir publiquement."
+    "un journal d'audit. Cette route rend les budgets transmis à /recommend — "
+    "les prix et les charges de ses appelants : ne l'ouvrir qu'à qui peut les "
+    "lire."
 )
 
 
