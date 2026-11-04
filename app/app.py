@@ -1,5 +1,10 @@
 """Interface Streamlit : elle interroge l'API, elle ne calcule rien.
 
+**Trois modes, deux modèles.** « Prédiction » et « Recommandation » interrogent
+le modèle de parcelle ; « Rendements nationaux » interroge celui du panel FAO,
+qui prolonge l'historique d'un pays et d'une culture. Le second mode n'affiche
+aucun formulaire de parcelle : son modèle n'en lit aucun champ.
+
 **Aucune logique métier ici.** Pas de modèle, pas de règle de dérivation, pas
 de seuil recopié. Tout vient de l'API — y compris la liste des cultures et les
 bornes des curseurs, lues dans `/model/info`. Recopier ces valeurs créerait un
@@ -21,6 +26,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from datetime import datetime
 
 import altair as alt
@@ -36,8 +42,29 @@ import streamlit as st
 #: l'API porte le nom de son service, pas celui de la machine.
 URL_API = os.environ.get("AGRITECH_API_URL", "http://localhost:8000").rstrip("/")
 
-#: Lecture courte : une API qui ne répond pas en 10 s est en panne, pas lente.
-DELAI_S = 10
+#: Lecture courte **en local** : une API qui ne répond pas en 10 s est en
+#: panne, pas lente. Un hébergement gratuit renverse ce raisonnement — Render
+#: endort le service après quinze minutes sans visite et met près d'une minute
+#: à le réveiller. Le réglage se relève donc par l'environnement, sans toucher
+#: au code ni pénaliser le développement.
+DELAI_S = float(os.environ.get("AGRITECH_API_TIMEOUT_S", "10"))
+
+#: Nombre d'essais avant de déclarer l'API injoignable. **Un seul en local** :
+#: une API absente doit se voir tout de suite, pas après trois attentes. En
+#: ligne, le premier appel réveille un conteneur endormi et les suivants
+#: aboutissent — plusieurs essais courts valent mieux qu'un seul très long,
+#: qui laisserait l'écran muet pendant deux minutes avant d'échouer.
+TENTATIVES = max(1, int(os.environ.get("AGRITECH_API_RETRIES", "1")))
+
+#: Pause entre deux essais. Le réveil n'est pas instantané : marteler le
+#: service ne l'accélère pas.
+PAUSE_S = 3.0
+
+#: Codes rendus par l'**hébergeur** quand le service redémarre, et non par
+#: l'application : la requête n'a pas été traitée, la rejouer ne risque donc
+#: rien. Un 500 est au contraire une réponse de l'application — la redemander
+#: rendrait la même erreur, en trois fois plus de temps.
+PASSERELLE = (502, 503, 504)
 
 
 class ErreurAPI(Exception):
@@ -48,25 +75,63 @@ class ErreurAPI(Exception):
     """
 
 
+def _apres(essais: int) -> str:
+    """Ne nomme le nombre d'essais que s'il y en a eu plusieurs."""
+    return "" if essais == 1 else f", après {essais} essais"
+
+
+def _injoignable() -> str:
+    """Le conseil dépend de l'endroit où l'API est censée se trouver.
+
+    Dire « lancez le conteneur » à quelqu'un qui ouvre un lien public serait
+    une instruction qu'il ne peut pas suivre, et qui laisse croire à une
+    panne là où le service dort seulement.
+    """
+    if "localhost" in URL_API or "127.0.0.1" in URL_API:
+        return (f"Impossible de joindre l'API à {URL_API}. Si le conteneur "
+                "existe déjà : `docker start agritech-api`. Au premier "
+                "lancement : `docker run -d --name agritech-api -p 8000:8000 "
+                "agritech-api:v2`")
+    return (f"Impossible de joindre l'API à {URL_API}. Le service est "
+            "peut-être en veille : réessayez dans une minute.")
+
+
 def _appeler(methode: str, chemin: str, corps: dict | None = None) -> dict:
-    """Un appel HTTP, et une erreur parlante quand il échoue."""
+    """Un appel HTTP, et une erreur parlante quand il échoue.
+
+    **Seuls l'injoignable et le trop lent sont rejoués.** Un 4xx ou un 5xx
+    est une réponse : la redemander ne la changerait pas, et masquerait une
+    saisie fautive derrière trois attentes. Les routes appelées ici sont
+    toutes sans effet de bord, donc rejouables sans risque de doublon.
+    """
     url = f"{URL_API}{chemin}"
-    try:
-        reponse = requests.request(methode, url, json=corps, timeout=DELAI_S)
-    except requests.Timeout as erreur:
-        raise ErreurAPI(
-            f"L'API n'a pas répondu en {DELAI_S} secondes."
-        ) from erreur
-    except requests.ConnectionError as erreur:
-        raise ErreurAPI(
-            f"Impossible de joindre l'API à {URL_API}. Si le conteneur "
-            "existe déjà : `docker start agritech-api`. Au premier "
-            "lancement : `docker run -d --name agritech-api -p 8000:8000 "
-            "agritech-api:v2`"
-        ) from erreur
+    for essai in range(1, TENTATIVES + 1):
+        dernier = essai == TENTATIVES
+        try:
+            reponse = requests.request(methode, url, json=corps,
+                                       timeout=DELAI_S)
+        except requests.Timeout as erreur:
+            if dernier:
+                raise ErreurAPI(
+                    f"L'API n'a pas répondu en {DELAI_S:.0f} secondes"
+                    f"{_apres(essai)}."
+                ) from erreur
+        except requests.ConnectionError as erreur:
+            if dernier:
+                raise ErreurAPI(_injoignable()) from erreur
+        else:
+            if dernier or reponse.status_code not in PASSERELLE:
+                break
+        time.sleep(PAUSE_S)
 
     if reponse.status_code == 422:
         raise ErreurAPI(_traduire_422(reponse))
+    if reponse.status_code in PASSERELLE:
+        raise ErreurAPI(
+            f"Le service n'est pas encore prêt (HTTP {reponse.status_code})"
+            f"{_apres(TENTATIVES)}. Il redémarre peut-être : réessayez dans "
+            "une minute."
+        )
     if not reponse.ok:
         raise ErreurAPI(
             f"L'API a répondu {reponse.status_code}. "
@@ -122,6 +187,27 @@ def recommander(contexte: dict, budgets: dict | None = None) -> dict:
     if budgets:
         corps["budgets"] = budgets
     return _appeler("POST", "/recommend", corps)
+
+
+def series_nationales() -> dict:
+    """Les couples (pays, culture) que le service national sait prédire.
+
+    C'est le catalogue de ce mode : les pays, leurs cultures et les libellés
+    français viennent tous de là. Les recopier ici ferait proposer un couple
+    que l'artefact ne connaît pas le jour où la table change.
+    """
+    return _appeler("GET", "/national/series")
+
+
+def predire_national(pays: str, culture: str) -> dict:
+    """Le rendement national attendu pour ce pays et cette culture."""
+    return _appeler("POST", "/national/predict",
+                    {"area": pays, "item": culture})
+
+
+def classer_national(pays: str) -> dict:
+    """Les cultures du pays, classées par rendement national estimé."""
+    return _appeler("POST", "/national/ranking", {"area": pays})
 
 
 def construire_budgets(tableau: pd.DataFrame) -> dict:
@@ -181,6 +267,17 @@ def _contrat() -> dict:
 def _prix() -> dict:
     """Les prix de référence, mêmes raisons."""
     return prix_reference()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _series() -> dict:
+    """Le catalogue national : 204 pays et leurs cultures.
+
+    Mis en cache pour la même raison que le contrat, et avec plus de force
+    encore : sans cela, changer de pays dans une liste déroulante relirait
+    1 106 couples à chaque frappe.
+    """
+    return series_nationales()
 
 
 def saisir_contexte(contrat: dict) -> dict:
@@ -418,6 +515,155 @@ def graphique_intervalle(reponse: dict) -> alt.LayerChart:
     ]
     return (alt.layer(plage, centre, *etiquettes)
             .properties(height=110).configure(locale=LOCALE_FR))
+
+
+def graphique_trajectoire(reponse: dict) -> alt.LayerChart:
+    """Les trois relevés, puis la prévision et son intervalle.
+
+    **C'est le graphique qui explique le modèle.** Il calcule une moyenne
+    pondérée des trois dernières années : montrer la suite rend visible ce
+    qu'il fait — il prolonge une trajectoire — là où un chiffre seul se
+    lirait comme une mesure de l'année à venir.
+
+    Les années sont en catégories et non en quantités : quatre points sur un
+    axe continu produiraient des graduations décimales, et « 2016,5 » ne
+    désigne rien.
+    """
+    observes = pd.DataFrame([
+        {"annee": str(releve["year"]), "rendement": releve["yield_t_ha"]}
+        for releve in reponse["history"]]).sort_values("annee")
+    intervalle = reponse["prediction_interval_95"]
+    prevision = pd.DataFrame([{
+        "annee": str(reponse["target_year"]),
+        "rendement": reponse["yield_t_ha"],
+        "bas": intervalle["lower_t_ha"], "haut": intervalle["upper_t_ha"]}])
+
+    annees = [*observes["annee"], *prevision["annee"]]
+    haut = max(intervalle["upper_t_ha"], observes["rendement"].max()) * 1.1
+    axe_x = alt.X("annee:N", title=None, sort=annees)
+    # L'échelle est construite à part : les deux couches doivent partager le
+    # même domaine, et relire celui d'un encodage déjà posé ne rend pas un
+    # objet réutilisable.
+    echelle = alt.Scale(domain=[0, haut], nice=False)
+    axe_y = alt.Y("rendement:Q", title="t/ha", scale=echelle)
+
+    trace = alt.Chart(observes).mark_line(
+        color="#2f855a", strokeWidth=2, point=alt.OverlayMarkDef(
+            color="#2f855a", size=90)).encode(x=axe_x, y=axe_y)
+    # L'intervalle en barre verticale : une incertitude se lit comme une
+    # étendue, jamais comme deux nombres dans une phrase.
+    plage = alt.Chart(prevision).mark_rule(
+        strokeWidth=12, color="#bcd3ea").encode(
+        x=axe_x, y=alt.Y("bas:Q", scale=echelle, title="t/ha"),
+        y2=alt.Y2("haut:Q"))
+    centre = alt.Chart(prevision).mark_point(
+        shape="diamond", size=260, filled=True, color="#2b6cb0").encode(
+        x=axe_x, y=axe_y)
+    return (alt.layer(plage, trace, centre)
+            .properties(height=260).configure(locale=LOCALE_FR))
+
+
+def graphique_classement(classement: dict) -> alt.LayerChart:
+    """Les cultures du pays en barres, avec leur dernier relevé en repère.
+
+    L'ordre est celui de l'API — le classement **est** le message. Le point
+    noir rappelle le rendement effectivement observé : quand il tombe loin de
+    la barre, c'est que la série est accidentée et que le modèle revient vers
+    sa moyenne.
+    """
+    donnees = pd.DataFrame([{
+        "culture": rang["item_fr"],
+        "prevision": rang["yield_t_ha"],
+        "observe": rang["last_observed_t_ha"],
+    } for rang in classement["ranking"]])
+    ordre = list(donnees["culture"])
+
+    axe_y = alt.Y("culture:N", title=None, sort=ordre)
+    barres_ = alt.Chart(donnees).mark_bar(color="#2f855a", height=18).encode(
+        x=alt.X("prevision:Q", title="t/ha"), y=axe_y,
+        tooltip=["culture", "prevision", "observe"])
+    repere = alt.Chart(donnees).mark_point(
+        shape="circle", size=70, filled=True, color="#2d3748").encode(
+        x=alt.X("observe:Q", title="t/ha"), y=axe_y)
+    return (alt.layer(barres_, repere)
+            .properties(height=max(150, 34 * len(ordre)))
+            .configure(locale=LOCALE_FR))
+
+
+def mode_national(series: dict) -> None:
+    """Un pays, une culture : le rendement national de l'année à venir.
+
+    **Aucune condition n'est demandée, et l'interface doit le dire.** Ce
+    modèle ne lit ni la pluie ni la température : il prolonge l'historique
+    national de la série choisie. Afficher les curseurs de parcelle ici
+    laisserait croire qu'ils comptent.
+    """
+    cible, reference = series["target_year"], series["reference_year"]
+    st.info(
+        f"**Rendements nationaux, pas parcellaires.** Ce second modèle "
+        f"prolonge l'historique FAO d'un pays et d'une culture. Il prédit "
+        f"**{cible}**, l'année qui suit le dernier relevé disponible "
+        f"({reference}) — pas la campagne en cours. Il ne demande aucune "
+        f"condition de culture : elles ne déplaceraient la prédiction que "
+        f"d'un centième de tonne.")
+
+    cultures_par_pays = {serie["area"]: serie["items"]
+                         for serie in series["areas"]}
+    gauche, droite = st.columns(2)
+    with gauche:
+        pays = st.selectbox(f"Pays ({series['areas_count']} disponibles)",
+                            list(cultures_par_pays),
+                            index=list(cultures_par_pays).index("France")
+                            if "France" in cultures_par_pays else 0,
+                            help="Noms tels que publiés par la FAO.")
+    disponibles = {culture["item"]: culture["item_fr"]
+                   for culture in cultures_par_pays[pays]}
+    with droite:
+        culture = st.selectbox(
+            f"Culture ({len(disponibles)} dans ce pays)", list(disponibles),
+            format_func=lambda item: disponibles[item],
+            help="Seules les cultures dont ce pays a un historique "
+                 "exploitable sont proposées.")
+
+    if not st.button("Estimer le rendement national", type="primary"):
+        return
+
+    with st.spinner("Interrogation de l'API…"):
+        reponse = predire_national(pays, culture)
+        classement = classer_national(pays)
+
+    intervalle = reponse["prediction_interval_95"]
+    gauche, droite = st.columns([1, 2])
+    with gauche:
+        dernier = reponse["history"][0]
+        st.metric(
+            f"{disponibles[culture]} — {pays}, {cible}",
+            f"{nombre_fr(reponse['yield_t_ha'], 2)} t/ha",
+            delta=f"{nombre_fr(reponse['yield_t_ha'] - dernier['yield_t_ha'], 2)}"
+                  f" t/ha vs {dernier['year']}")
+        st.caption(f"entre {nombre_fr(intervalle['lower_t_ha'], 1)} et "
+                   f"{nombre_fr(intervalle['upper_t_ha'], 1)} t/ha")
+    with droite:
+        st.altair_chart(graphique_trajectoire(reponse), width="stretch")
+
+    couverture = nombre_fr(intervalle["measured_coverage"] * 100, 1)
+    st.caption(
+        f"**La fourchette est empirique.** Sa couverture a été mesurée à "
+        f"{couverture} % globalement sur des années que le modèle n'avait pas "
+        "vues, mais elle n'est pas garantie pour une prédiction donnée : elle "
+        "varie selon le niveau de rendement et selon la culture.")
+
+    st.divider()
+    st.subheader(f"Les cultures de ce pays, classées — {pays}")
+    st.caption(classement["ranking_note"])
+    if len(classement["ranking"]) > 1:
+        st.altair_chart(graphique_classement(classement), width="stretch")
+        st.caption(
+            "Barre verte : le rendement estimé pour l'année à venir. Point "
+            f"noir : le rendement relevé en {reference}.")
+    st.warning(classement["economic_note"])
+
+    afficher_qualite(reponse)
 
 
 def mode_prediction(contexte: dict, contrat: dict) -> None:
@@ -878,11 +1124,23 @@ def sources_et_limites() -> None:
             "réelle.\n\n"
             "**Les prix sont des médianes mondiales**, pas des prix "
             "français, et les charges n'ont aucune source dans ce projet.\n\n"
+            "**Deux modèles, deux questions.** Les modes « Prédiction » et "
+            "« Recommandation » interrogent un modèle de parcelle entraîné "
+            "sur des données simulées. Le mode « Rendements nationaux » "
+            "interroge un second modèle, entraîné sur les relevés réels de "
+            "la FAO, mais à l'échelle d'un pays et d'une année : il prolonge "
+            "un historique national et ne décrit aucune parcelle. Les deux "
+            "ne se remplacent pas, et leurs erreurs ne se comparent pas.\n\n"
+            "**Le classement national n'est pas un classement de "
+            "rentabilité.** Il manque six prix sur dix pour ces cultures, et "
+            "sur les quatre tarifées l'ordre change entre les tonnes et la "
+            "valeur. Qu'une pomme de terre rende dix fois plus qu'un soja ne "
+            "dit rien de ce qu'elle rapporte.\n\n"
             "**Cette application ne calcule rien.** Toute valeur affichée "
             "vient de l'API.")
 
 
-def informations_techniques(contrat: dict) -> None:
+def informations_techniques(contrat: dict, series: dict | None = None) -> None:
     """Qui a répondu — en trois blocs qu'il serait faux de confondre.
 
     Le modèle **servi** est celui que l'API a chargé à son démarrage. Sa
@@ -927,9 +1185,28 @@ def informations_techniques(contrat: dict) -> None:
             "Promu le": origine["promu_le"],
         }), hide_index=True, width="stretch")
 
+        if series:
+            servi_national = series["served_model"]
+            st.markdown("**Le second modèle, national**")
+            st.dataframe(_lignes({
+                "Registre": servi_national["registry"],
+                "Version servie": servi_national["version"],
+                "Chargé depuis": servi_national["source"],
+                "Dernière année observée": series["reference_year"],
+                "Année prédite": series["target_year"],
+                "Pays servis": series["areas_count"],
+                "Couples (pays, culture)": series["series_count"],
+            }), hide_index=True, width="stretch")
+            st.caption(
+                "Ce modèle a son propre registre et son propre alias : les "
+                "deux artefacts n'attendent pas les mêmes entrées — huit "
+                "saisies de parcelle d'un côté, un pays et une culture de "
+                "l'autre — et leurs versions ne sont pas interchangeables.")
+
         if st.button("Relire les informations de l'API"):
             _contrat.clear()
             _prix.clear()
+            _series.clear()
             st.rerun()
         st.caption(
             "Ce bouton relit ce que l'API **déclare** — utile après un "
@@ -953,39 +1230,63 @@ def main() -> None:
                        layout="wide")
     st.title("Agritech Answers — estimation de rendement")
 
+    # Le premier appel est celui qui réveille un service endormi : il peut
+    # durer, et un écran muet pendant ce temps se lit comme une panne.
     try:
-        contrat = _contrat()
+        with st.spinner("Connexion au service…"):
+            contrat = _contrat()
     except ErreurAPI as erreur:
         st.error(str(erreur))
+        if st.button("Réessayer"):
+            st.rerun()
         st.stop()
+
+    try:
+        series = _series()
+    except ErreurAPI as erreur:
+        # Le catalogue national manque : les deux modes de parcelle restent
+        # utilisables, et c'est tout l'intérêt de ne pas s'arrêter ici.
+        series = None
+        st.warning(f"Service national indisponible. {erreur}")
 
     with st.sidebar:
         st.header("Mode")
-        mode = st.radio("Que voulez-vous faire ?",
-                        ["Prédiction", "Recommandation"],
-                        captions=["Le rendement d'une culture",
-                                  "Comparer les six cultures"],
+        modes = ["Prédiction", "Recommandation"]
+        legendes = ["Le rendement d'une parcelle",
+                    "Comparer les six cultures"]
+        if series:
+            modes.append("Rendements nationaux")
+            legendes.append(f"Un pays, une culture, {series['target_year']}")
+        mode = st.radio("Que voulez-vous faire ?", modes, captions=legendes,
                         label_visibility="collapsed")
         st.divider()
         servi = contrat["served_model"]
         st.caption(f"API : {URL_API}")
-        st.caption(f"Modèle : {servi['registry']} v{servi['version']}")
-
-    st.subheader("Votre parcelle")
-    contexte = saisir_contexte(contrat)
-    st.divider()
+        st.caption(f"Parcelle : {servi['registry']} v{servi['version']}")
+        if series:
+            national = series["served_model"]
+            st.caption(f"National : {national['registry']} "
+                       f"v{national['version']}")
 
     try:
-        if mode == "Prédiction":
-            mode_prediction(contexte, contrat)
+        if mode == "Rendements nationaux":
+            # Pas de formulaire de parcelle ici : ce modèle n'en lit aucun
+            # champ, et les afficher laisserait croire qu'ils comptent.
+            mode_national(series)
         else:
-            mode_recommandation(contexte, contrat)
+            st.subheader("Votre parcelle")
+            contexte = saisir_contexte(contrat)
+            st.divider()
+            if mode == "Prédiction":
+                mode_prediction(contexte, contrat)
+            else:
+                mode_recommandation(contexte, contrat)
     except ErreurAPI as erreur:
         st.error(str(erreur))
 
     st.divider()
     sources_et_limites()
-    informations_techniques(contrat)
+    informations_techniques(contrat, series)
 
 
 if __name__ == "__main__":

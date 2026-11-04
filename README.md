@@ -49,12 +49,12 @@ uv.lock            versions exactes — la seule source de vérité
 | `src/agritech/preparation.py` | construction du dataset consolidé, en fonctions pures |
 | `src/agritech/decoupage.py` | découpage train/val/test et ses garde-fous |
 | `src/agritech/pipeline.py` | orchestration des quatre étapes et de leurs empreintes |
-| `src/agritech/preprocessing.py` | reconstruction des 13 variables du modèle à partir des 8 saisies |
+| `src/agritech/preprocessing.py` | reconstruction des variables du modèle : 13 colonnes depuis 8 saisies de parcelle, 8 colonnes depuis un couple (pays, culture) |
 | `src/agritech/training.py` | modèles, optimisation Optuna, journalisation MLflow |
 | `src/agritech/evaluation.py` | métriques de prédiction, économiques et de recommandation |
 | **Service et interface** | |
-| `api/main.py` · `api/schemas.py` | les six routes et leurs contrats Pydantic |
-| `api/service.py` | chargement du modèle, vérification de son empreinte, prédiction |
+| `api/main.py` · `api/schemas.py` | les neuf routes et leurs contrats Pydantic |
+| `api/service.py` | chargement des deux modèles, vérification de leurs empreintes, prédiction |
 | `api/journal.py` | journal des appels, servi par `/logs` |
 | `app/app.py` | interface Streamlit, qui interroge l'API en HTTP |
 | `Dockerfile` | image de service : ni MLflow, ni données, ni uv |
@@ -62,22 +62,26 @@ uv.lock            versions exactes — la seule source de vérité
 | `scripts/run_pipeline.py` | la chaîne entière, d'une étape à une autre |
 | `scripts/prepare_data.py` | préparation — produit `data/processed/` |
 | `scripts/split_data.py` | découpage — produit `data/processed/splits/` |
-| `scripts/train.py` | entraînement — 4 études × 100 essais Optuna |
-| `scripts/export_api_model.py` | export de l'artefact servi et de sa provenance |
+| `scripts/train.py` | entraînement — 4 études × 100 essais Optuna, par chaîne |
+| `scripts/export_api_model.py` | export de l'artefact servi et de sa provenance, pour l'une ou l'autre chaîne |
 | `scripts/smoke_docker.py` | épreuve d'un conteneur réel, bibliothèque standard seule |
 | `scripts/build_report_figures.py` | figures des rapports |
 | **Données** | |
 | `data/OC_InputData/` | les six fichiers sources |
 | `data/interim/` | panel FAO, référentiel par culture, dictionnaire des variables |
-| `data/processed/` | dataset consolidé — CSV livrable et Parquet de travail |
-| `data/processed/splits/` | train / val / test et leurs métadonnées |
+| `data/processed/` | dataset consolidé et panel FAO — CSV livrables et Parquet de travail |
+| `data/processed/splits/` | train / val / test des parcelles, et `real/` pour le panel |
 | **Modèles** | |
-| `models/modele_final.joblib` | le modèle retenu à l'issue de la comparaison |
-| `models/modele_api.joblib` | l'artefact servi par l'API, prétraitement compris |
+| `models/modele_final.joblib` | le modèle de parcelle retenu à l'issue de la comparaison |
+| `models/modele_final_panel.joblib` | celui du panel FAO, retenu de la même façon |
+| `models/modele_api.joblib` | l'artefact de parcelle servi par l'API, prétraitement compris |
 | `models/modele_api.json` | sa provenance : registre, version, empreintes, versions des bibliothèques |
+| `models/modele_api_panel.joblib` | l'artefact national, qui embarque les derniers retards de 1 106 séries |
+| `models/modele_api_panel.json` | sa provenance, année de référence et taille de table comprises |
 | **Documentation** | |
 | [`reports/data_preparation_summary.md`](reports/data_preparation_summary.md) | construction du dataset consolidé |
 | [`reports/model_experimentation_summary.md`](reports/model_experimentation_summary.md) | comparaison des modèles et choix du Ridge |
+| [`reports/model_experimentation_panel_summary.md`](reports/model_experimentation_panel_summary.md) | la seconde chaîne : prévision nationale sur le panel FAO |
 | [`reports/prediction_api_summary.md`](reports/prediction_api_summary.md) | conception de l'API |
 | [`reports/streamlit_app_summary.md`](reports/streamlit_app_summary.md) | conception de l'interface |
 
@@ -105,7 +109,17 @@ Les deux pièces se lancent séparément, dans deux terminaux, et dans cet ordre
 
 ### Lancer l'API — FastAPI
 
-Le service porte le modèle. Il expose six routes HTTP, vérifie l'empreinte de l'artefact puis le charge au démarrage, et n'a **aucune interface** : il répond en JSON. C'est lui qui calcule les rendements, les intervalles et les marges.
+Le service porte les modèles. Il expose neuf routes HTTP, vérifie l'empreinte de **chaque** artefact puis les charge au démarrage, et n'a **aucune interface** : il répond en JSON. C'est lui qui calcule les rendements, les intervalles et les marges.
+
+Les routes se répartissent en deux familles, qui ne répondent pas à la même question :
+
+| Famille | Routes | Unité d'observation | Données |
+|---|---|---|---|
+| Parcelle | `POST /predict`, `POST /recommend` | une parcelle, dans des conditions saisies | parcelles **simulées** |
+| National | `POST /national/predict`, `POST /national/ranking`, `GET /national/series` | un pays, une culture, une année | panel FAO **observé** |
+| Service | `GET /health`, `GET /logs`, `GET /model/info`, `GET /reference/prices` | — | — |
+
+Les deux familles sont servies par **deux artefacts distincts**, chacun avec son registre, son alias et son empreinte. Un démarrage échoue si l'un des deux manque : l'image embarque les quatre fichiers, et un `COPY` incomplet est une erreur de construction, pas une fonctionnalité désactivée.
 
 ```bash
 uv run uvicorn api.main:app --port 8000
@@ -120,7 +134,13 @@ L'option `--reload` recharge le service à chaque modification du code, pratique
 
 ### Lancer l'interface — Streamlit
 
-L'interface est ce que voit l'agriculteur. Elle n'importe ni FastAPI, ni scikit-learn, ni le modèle : elle interroge le service **en HTTP** et met en forme ses réponses. Deux modes — estimer le rendement d'une parcelle, ou comparer les six cultures sur leur rendement et leur marge brute.
+L'interface est ce que voit l'agriculteur. Elle n'importe ni FastAPI, ni scikit-learn, ni le modèle : elle interroge le service **en HTTP** et met en forme ses réponses. Trois modes :
+
+- **Prédiction** — le rendement d'une parcelle dans les conditions saisies ;
+- **Recommandation** — les six cultures comparées sur leur rendement, puis sur leur marge brute ;
+- **Rendements nationaux** — un pays, une culture, et le rendement national de l'année qui suit le dernier relevé FAO, avec le classement des cultures de ce pays.
+
+Le troisième mode **n'affiche aucun curseur de parcelle**, et c'est délibéré : son modèle ne lit aucune condition de culture. Les afficher laisserait croire qu'elles comptent. Ses listes de pays et de cultures viennent de `GET /national/series`, jamais d'une copie locale.
 
 Dans un **second terminal**, le service devant déjà tourner :
 
@@ -135,7 +155,7 @@ $env:AGRITECH_API_URL = "http://localhost:8080"   # PowerShell
 uv run streamlit run app/app.py
 ```
 
-Sans service joignable, l'interface affiche l'adresse qu'elle a tentée et la commande pour démarrer le conteneur, plutôt qu'une page vide.
+Sans service joignable, l'interface affiche l'adresse qu'elle a tentée plutôt qu'une page vide — avec la commande de démarrage du conteneur si cette adresse est locale, et un bouton *Réessayer* si elle ne l'est pas : devant un service hébergé, redemander est la seule action utile.
 
 ### Partir de l'image publiée
 
@@ -148,18 +168,81 @@ docker run -d --name agritech-api -p 8000:8000 faiza7/agritech-api:latest
 
 L'image pèse environ 146 Mo et embarque son modèle : ni données, ni MLflow, ni uv. Deux étiquettes sont publiées — `latest`, qui suit `main`, et le SHA du commit, qui rattache chaque image à son code.
 
-### Disponibilité et hébergement
+### Déployer publiquement — Render et Streamlit Community Cloud
 
-**Aucune instance publique n'est hébergée.** Un agriculteur ne peut donc pas, aujourd'hui, utiliser l'outil sans installer quelque chose. Les deux parcours ci-dessus supposent une machine avec Python ou Docker. L'hébergement du service et de l'interface reste à faire.
+Les deux composants se déploient **séparément**, et c'est exactement ce que permet leur découplage : l'interface n'interroge le service qu'en HTTP, sans jamais importer ni FastAPI ni le modèle.
+
+**L'API, sur Render.** Render tire l'image déjà publiée sur Docker Hub ; rien n'est reconstruit.
+
+| Réglage | Valeur |
+|---|---|
+| Source | **Existing Image** → `docker.io/faiza7/agritech-api:latest` |
+| Instance Type | Free |
+| Variable d'environnement | `PORT` = `8000` |
+| Health Check Path | `/health` |
+
+`PORT` n'est pas facultatif : Render route vers le port `10000` par défaut, là où le `CMD` de l'image écoute sur 8000. Sans cette variable, le déploiement échoue faute de port ouvert. Et un service bâti sur une image **ne se redéploie pas tout seul** quand l'étiquette bouge : après une nouvelle publication, il faut *Manual Deploy → Deploy latest reference*, ou appeler le *deploy hook* du service. La chaîne de livraison s'arrête donc à Docker Hub, délibérément : ce qui est publié n'est pas automatiquement servi.
+
+Un `GET /health` sur l'URL obtenue doit rendre **deux** provenances — `served_model` et `served_model_national`. Une seule signalerait une image mal construite.
+
+**L'interface, sur Streamlit Community Cloud.** Le dépôt est lu directement, aucune image n'intervient.
+
+| Réglage | Valeur |
+|---|---|
+| Main file path | `app/app.py` |
+| Python version | 3.12 |
+| Secrets | le bloc TOML ci-dessous |
+
+Les dépendances viennent de `app/requirements.txt`, pas de celui de la racine : Community Cloud cherche le fichier dans le dossier du point d'entrée **avant** la racine. C'est ce qui permet aux deux de coexister — celui de la racine exporte le groupe `api`, celui-ci le groupe `ui`. Les deux sont produits par `uv export` et ne sont jamais édités à la main ; `uv.lock` reste la seule source de vérité.
+
+**Les limites du plan gratuit, et ce que le code en fait.** Render Free endort le service après quinze minutes sans trafic et met près d'une minute à le réveiller. Le délai de dix secondes de l'interface — juste en local, où une API muette est une API en panne — rendrait l'application publique inutilisable : *chaque* première visite échouerait. D'où les deux réglages à poser dans les secrets Streamlit, en clés de premier niveau pour qu'ils deviennent des variables d'environnement :
+
+```toml
+AGRITECH_API_URL = "https://<votre-service>.onrender.com"
+AGRITECH_API_TIMEOUT_S = "30"
+AGRITECH_API_RETRIES = "5"
+```
+
+Cinq essais de trente secondes couvrent deux minutes et demie, en autant d'attentes annoncées plutôt qu'un seul silence de deux minutes. Seuls les délais dépassés, les connexions refusées et les **502/503/504** sont rejoués : ceux-là viennent de l'hébergeur et la requête n'a pas été traitée. Un 422 ou un 500 est une réponse de l'application — le rejouer rendrait la même erreur en trois fois plus de temps, et masquerait une saisie fautive derrière une lenteur apparente.
+
+### Suivre le service en production
+
+Le journal écrit à **deux destinations**, qui ne portent pas la même chose.
+
+| Destination | Contenu | Durée de vie |
+|---|---|---|
+| Tampon mémoire, via `GET /logs` | corps des requêtes et des réponses, 100 derniers appels | perdu à chaque redémarrage — donc toutes les quinze minutes sur Render Free |
+| Sortie standard, ramassée par l'hébergeur | métadonnées seules : route, méthode, statut, durée, `request_id` | 7 jours sur l'offre gratuite de Render |
+
+La répartition est un choix de sécurité, pas de confort : les corps de `/recommend` contiennent les prix et les charges de l'appelant. Les déverser sur la sortie standard les afficherait une semaine durant dans un tableau de bord. Ils restent donc dans le tampon, et `request_id` — présent des deux côtés — fait le lien entre une ligne de log et l'appel complet.
+
+Chaque ligne est un objet JSON, directement filtrable dans l'explorateur de Render :
+
+```json
+{"timestamp": "2026-11-04T09:30:00+00:00", "level": "INFO", "event": "appel_api",
+ "request_id": "a3f29c81b4e0", "method": "POST", "route": "/national/predict",
+ "status": 200, "duration_ms": 14.6}
+```
+
+Le démarrage émet aussi `modele_charge` pour chacun des deux artefacts, avec son registre, sa version et sa provenance — et `chargement_modele_echoue` en cas d'échec, **avant** que l'exception n'arrête le processus. C'est la seule trace possible dans ce cas : un conteneur qui refuse de démarrer ne répond à aucune route, donc ni `/health` ni `/logs` ne diront jamais pourquoi.
+
+Au-delà de sept jours, il faudrait diriger ces lignes vers une destination externe. Écrire dans un fichier ne servirait à rien : le système de fichiers d'une instance Free est éphémère.
 
 ### Variables d'environnement et secrets
 
-Le projet lit exactement **deux variables**, et aucune n'est un secret.
+Le projet lit **cinq variables**, et aucune n'est un secret.
 
 | Variable | Lue par | Défaut | Rôle |
 |---|---|---|---|
 | `AGRITECH_API_URL` | `app/app.py` | `http://localhost:8000` | adresse du service, indispensable si l'interface et l'API ne sont pas sur la même machine |
-| `AGRITECH_MODEL_URI` | `api/service.py` | absente | bascule du joblib embarqué vers le registre MLflow — `models:/agritech-rendement-api@champion` |
+| `AGRITECH_API_TIMEOUT_S` | `app/app.py` | `10` | délai d'attente d'**un** appel, à relever face à un hébergement qui met le service en veille |
+| `AGRITECH_API_RETRIES` | `app/app.py` | `1` | essais avant d'abandonner — un seul en local, où une API absente doit se voir tout de suite |
+| `AGRITECH_MODEL_URI` | `api/service.py` | absente | bascule du joblib de parcelle vers le registre MLflow — `models:/agritech-rendement-api@champion` |
+| `AGRITECH_PANEL_MODEL_URI` | `api/service.py` | absente | la même bascule pour l'artefact national — `models:/agritech-rendement-panel-api@champion` |
+
+Deux variables de bascule et non une : les deux artefacts ont des registres distincts et des contrats d'entrée différents, et on doit pouvoir servir l'un depuis le registre sans toucher à l'autre.
+
+Les deux réglages d'attente sont séparés pour la même raison : un délai long et un seul essai laisseraient l'écran muet pendant deux minutes avant d'échouer, là où plusieurs essais courts rendent la main et s'expliquent.
 
 Deux réglages sont en revanche nécessaires **côté GitHub**, pour que la livraison puisse publier :
 
@@ -441,9 +524,9 @@ Le registre MLflow n'est une source de chargement que si `AGRITECH_MODEL_URI` es
 
 ### L'interface — Streamlit
 
-L'interface n'importe ni FastAPI, ni le modèle : elle interroge le service en HTTP, et les deux pourraient être déployés séparément — sur deux machines, ou l'un en conteneur et l'autre non. C'est `AGRITECH_API_URL` qui les relie.
+L'interface n'importe ni FastAPI, ni le modèle : elle interroge le service en HTTP. Les deux sont effectivement déployés séparément — l'un en conteneur sur Render, l'autre sur Streamlit Community Cloud —, et c'est `AGRITECH_API_URL` qui les relie.
 
-Elle propose deux modes — décrire une parcelle pour en estimer le rendement, ou comparer les six cultures.
+Elle propose **trois modes**, pour **deux modèles** : décrire une parcelle pour en estimer le rendement, comparer les six cultures, ou lire le rendement national d'un pays. Le troisième interroge le panel FAO et n'affiche aucun formulaire de parcelle — ce modèle n'en lit aucun champ, et les montrer laisserait croire qu'ils comptent. Les listes de pays et de cultures viennent de `GET /national/series` : l'artefact est seul à savoir quelles séries ont un historique exploitable.
 
 Le second mode dépasse le rendement. Les six cultures étant statistiquement proches, l'interface permet de saisir les charges opérationnelles par culture et calcule une **marge brute simulée** — rendement × prix − charges —, qui les sépare bien mieux. Le détail de la conception est dans [`reports/streamlit_app_summary.md`](reports/streamlit_app_summary.md).
 
@@ -471,4 +554,6 @@ La marge brute repose sur un prix de référence de 200 €/t, avec une sensibil
 
 ### Perspectives
 
-Héberger le service et l'interface, pour qu'un agriculteur n'ait rien à installer. Mesurer la dérive du modèle en production. Et remplacer le jeu simulé par des observations réelles — c'est de loin ce qui changerait le plus la valeur de l'ensemble.
+L'hébergement public est désormais décrit en [section 2](#2-installation-et-démarrage) — Render pour le service, Streamlit Community Cloud pour l'interface —, mais sur des offres gratuites : le service s'endort après quinze minutes sans visite, et la première requête qui le réveille attend près d'une minute. Un usage réel demanderait une instance qui ne dort pas.
+
+Resterait ensuite à mesurer la dérive du modèle en production — les métadonnées émises sur la sortie standard en sont le point de départ, pas la mesure. Et à remplacer le jeu simulé par des observations réelles : c'est de loin ce qui changerait le plus la valeur de l'ensemble.

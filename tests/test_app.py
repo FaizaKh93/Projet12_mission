@@ -26,6 +26,7 @@ import requests
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
+from app import app as module_app
 from app.app import (
     URL_API,
     ErreurAPI,
@@ -35,8 +36,13 @@ from app.app import (
     completer,
     construire_budgets,
     csv_resultats,
+    predire_national,
+    series_nationales,
     fusionner_rendements,
+    classer_national,
+    graphique_classement,
     graphique_intervalle,
+    graphique_trajectoire,
     info_modele,
     message_sensibilite,
     nombre_fr,
@@ -144,6 +150,74 @@ PRIX = {
 CONTEXTE = {"rainfall_mm": 650.0, "temperature_celsius": 22.0,
             "fertilizer_used": True, "irrigation_used": True}
 
+# --------------------------------------------------------------------------- #
+# Le service national — charges recopiées de la forme réelle des réponses
+# --------------------------------------------------------------------------- #
+
+SERVI_NATIONAL = {"registry": "agritech-rendement-panel-api", "version": 2,
+                  "source": "bundled-joblib"}
+
+QUALITE_NATIONALE = {
+    "training_data": "real", "data_version": "73ba4ab01cea",
+    "split_version": "61277baafb1d", "economic_assumptions_version": None,
+    "warnings": [],
+    "limitations": ["Prévision pour 2017, pas la campagne en cours.",
+                    "Rendement national annuel, non parcellaire.",
+                    "Aucune condition de culture n'entre dans le calcul.",
+                    "Intervalle empirique : couverture globale, non une "
+                    "garantie par prédiction."],
+}
+
+#: Deux pays : l'un à plusieurs cultures, l'autre à une seule — le second cas
+#: ne doit pas afficher un « classement » d'un élément.
+SERIES = {
+    "reference_year": 2016, "target_year": 2017,
+    "areas": [
+        {"area": "France", "items": [
+            {"item": "Wheat", "item_fr": "Blé"},
+            {"item": "Potatoes", "item_fr": "Pomme de terre"}]},
+        {"area": "Syldavia", "items": [
+            {"item": "Maize", "item_fr": "Maïs"}]},
+    ],
+    "areas_count": 2, "series_count": 3,
+    "served_model": SERVI_NATIONAL,
+    "caveat": "séries interrompues écartées",
+}
+
+INTERVALLE_NATIONAL = {"lower_t_ha": 3.886, "upper_t_ha": 9.303,
+                       "nominal_coverage": 0.95, "measured_coverage": 0.9667}
+
+PREDICTION_NATIONALE = {
+    "area": "France", "item": "Wheat",
+    "reference_year": 2016, "target_year": 2017,
+    "yield_t_ha": 6.198,
+    "prediction_interval_95": INTERVALLE_NATIONAL,
+    "history": [{"year": 2016, "yield_t_ha": 5.3041},
+                {"year": 2015, "yield_t_ha": 7.8008},
+                {"year": 2014, "yield_t_ha": 7.353}],
+    "data_quality": QUALITE_NATIONALE,
+    "served_model": SERVI_NATIONAL,
+}
+
+CLASSEMENT_NATIONAL = {
+    "area": "France", "reference_year": 2016, "target_year": 2017,
+    "ranking": [
+        {"item": "Potatoes", "item_fr": "Pomme de terre", "yield_t_ha": 40.954,
+         "prediction_interval_95": {"lower_t_ha": 25.68, "upper_t_ha": 61.47,
+                                    "nominal_coverage": 0.95,
+                                    "measured_coverage": 0.9667},
+         "last_observed_t_ha": 39.0052},
+        {"item": "Wheat", "item_fr": "Blé", "yield_t_ha": 6.198,
+         "prediction_interval_95": INTERVALLE_NATIONAL,
+         "last_observed_t_ha": 5.3041},
+    ],
+    "ranking_note": "Classement par rendement national estimé pour 2017, non "
+                    "par rentabilité.",
+    "economic_note": "Aucune marge : il manque six prix sur dix.",
+    "data_quality": QUALITE_NATIONALE,
+    "served_model": SERVI_NATIONAL,
+}
+
 
 # --------------------------------------------------------------------------- #
 # Le faux serveur
@@ -193,6 +267,9 @@ def serveur(monkeypatch):
         "/reference/prices": FausseReponse(PRIX),
         "/predict": FausseReponse(PREDICTION),
         "/recommend": FausseReponse(RECOMMANDATION),
+        "/national/series": FausseReponse(SERIES),
+        "/national/predict": FausseReponse(PREDICTION_NATIONALE),
+        "/national/ranking": FausseReponse(CLASSEMENT_NATIONAL),
     }
 
     def repondre(methode, url, json=None, timeout=None):
@@ -211,6 +288,42 @@ def panne(monkeypatch):
         def lever(*_, **__):
             raise exception
         monkeypatch.setattr(requests, "request", lever)
+    return poser
+
+
+@pytest.fixture
+def relances(monkeypatch):
+    """Arme les relances, sans la pause qui les accompagne en production.
+
+    Trois secondes d'attente par essai sont justes devant un conteneur qui
+    redémarre, et absurdes dans une suite de tests : seul l'enchaînement est
+    éprouvé ici, pas la patience.
+    """
+    def armer(tentatives: int):
+        monkeypatch.setattr(module_app, "TENTATIVES", tentatives)
+        monkeypatch.setattr(module_app, "PAUSE_S", 0.0)
+    return armer
+
+
+@pytest.fixture
+def sequence(monkeypatch):
+    """Fait répondre l'API selon une suite d'issues, une par appel.
+
+    Une exception est levée, une `FausseReponse` est rendue. La dernière
+    issue vaut pour tous les appels suivants, ce qui permet de décrire
+    « deux échecs puis un succès » comme « un échec qui dure ».
+    """
+    appels = []
+
+    def poser(*issues):
+        def repondre(methode, url, json=None, timeout=None):
+            appels.append(url)
+            issue = issues[min(len(appels) - 1, len(issues) - 1)]
+            if isinstance(issue, Exception):
+                raise issue
+            return issue
+        monkeypatch.setattr(requests, "request", repondre)
+        return appels
     return poser
 
 
@@ -274,6 +387,84 @@ def test_delai_depasse_est_nomme_comme_tel(panne):
 
     with pytest.raises(ErreurAPI, match="n'a pas répondu"):
         info_modele()
+
+
+# --------------------------------------------------------------------------- #
+# Les relances
+#
+# Un hébergement gratuit endort le service après quinze minutes sans visite,
+# et le réveil prend près d'une minute. Ces tests décrivent **ce qui est
+# rejoué et ce qui ne l'est pas** : c'est la distinction qui compte, bien plus
+# que le nombre d'essais.
+# --------------------------------------------------------------------------- #
+
+
+def test_un_reveil_lent_est_rejoue_puis_aboutit(relances, sequence):
+    """Deux délais dépassés, puis la réponse : l'appelant ne voit rien."""
+    relances(3)
+    appels = sequence(requests.Timeout("réveil"), requests.Timeout("réveil"),
+                      FausseReponse(CONTRAT))
+
+    assert info_modele()["accepted_values"]["Crop"] == CULTURES
+    assert len(appels) == 3
+
+
+def test_une_passerelle_qui_redemarre_est_rejouee(relances, sequence):
+    """Un 503 vient de l'hébergeur, pas de l'application : il se rejoue."""
+    relances(3)
+    appels = sequence(FausseReponse({"detail": "starting"}, 503),
+                      FausseReponse(CONTRAT))
+
+    assert info_modele()["accepted_values"]["Crop"] == CULTURES
+    assert len(appels) == 2
+
+
+def test_les_essais_epuises_nomment_leur_nombre(relances, sequence):
+    """Après trois attentes, le message doit dire qu'il y en a eu trois."""
+    relances(3)
+    appels = sequence(requests.Timeout("toujours"))
+
+    with pytest.raises(ErreurAPI, match="après 3 essais"):
+        info_modele()
+    assert len(appels) == 3
+
+
+def test_une_passerelle_persistante_parle_de_redemarrage(relances, sequence):
+    """Un 503 qui dure n'est pas « l'API a répondu 503 » pour un agriculteur."""
+    relances(2)
+    sequence(FausseReponse({"detail": "starting"}, 503))
+
+    with pytest.raises(ErreurAPI, match="n'est pas encore prêt"):
+        info_modele()
+
+
+def test_une_saisie_refusee_n_est_jamais_rejouee(relances, sequence):
+    """Un 422 est une réponse : la redemander rendrait la même.
+
+    C'est la contrepartie des relances. Les rejouer ferait attendre trois
+    fois celui qui a simplement mal rempli un champ, et masquerait sa faute
+    derrière une lenteur apparente.
+    """
+    relances(3)
+    appels = sequence(FausseReponse(
+        {"detail": [{"loc": ["body", "rainfall_mm"], "msg": "trop bas"}]}, 422))
+
+    with pytest.raises(ErreurAPI, match="rainfall_mm"):
+        info_modele()
+    assert len(appels) == 1
+
+
+def test_le_conseil_depend_de_l_adresse_de_l_api(monkeypatch, panne):
+    """« Lancez le conteneur » n'a aucun sens devant un lien public."""
+    monkeypatch.setattr(module_app, "URL_API", "https://agritech.onrender.com")
+    panne(requests.ConnectionError("refused"))
+
+    with pytest.raises(ErreurAPI) as capture:
+        info_modele()
+
+    message = str(capture.value)
+    assert "en veille" in message
+    assert "docker" not in message
 
 
 def test_422_nomme_le_champ_refuse(serveur):
@@ -500,6 +691,25 @@ def test_api_eteinte_arrete_l_application_avec_un_message(panne):
     assert not application.exception
     assert application.error
     assert "docker start" in application.error[0].value
+
+
+def test_le_bouton_reessayer_redemande_le_contrat(panne):
+    """Devant un service en veille, la seule action utile est de redemander.
+
+    L'interface la propose au lieu de la décrire : écrire « rechargez la
+    page » laisse le travail à celui qui ne sait pas pourquoi il échoue.
+    """
+    panne(requests.ConnectionError("refused"))
+    application = AppTest.from_file(CHEMIN_APP, default_timeout=30).run()
+
+    reessayer = next(bouton for bouton in application.button
+                     if bouton.label == "Réessayer")
+    reessayer.click().run()
+
+    # La panne dure : on retrouve le message, et surtout aucune exception —
+    # le `st.rerun()` a bien été traversé.
+    assert not application.exception
+    assert application.error
 
 
 def test_les_sources_et_limites_sont_toujours_presentes(serveur):
@@ -1046,3 +1256,131 @@ def test_un_422_au_detail_textuel_est_repris_tel_quel(serveur):
 
     with pytest.raises(ErreurAPI, match="culture inconnue"):
         predire(CONTEXTE, "Quinoa")
+
+
+# --------------------------------------------------------------------------- #
+# Le mode national
+#
+# Deux promesses à tenir : l'interface ne propose que des couples que l'API
+# sait prédire, et elle ne demande aucune condition de culture dans ce mode.
+# La seconde est la plus facile à trahir — il suffirait de laisser le
+# formulaire de parcelle s'afficher au-dessus.
+# --------------------------------------------------------------------------- #
+
+
+def test_le_catalogue_national_est_lu_depuis_l_api(serveur):
+    """Les pays et les cultures viennent de `/national/series`, pas d'ici."""
+    assert series_nationales() == SERIES
+    assert serveur["appels"][-1]["url"].endswith("/national/series")
+
+
+def test_la_prediction_nationale_envoie_le_pays_et_la_culture(serveur):
+    """Deux clés dans le corps, et rien d'autre : aucune condition."""
+    predire_national("France", "Wheat")
+
+    appel = serveur["appels"][-1]
+    assert appel["url"].endswith("/national/predict")
+    assert appel["corps"] == {"area": "France", "item": "Wheat"}
+
+
+def test_le_classement_national_n_envoie_que_le_pays(serveur):
+    """La liste des cultures est celle du pays : l'API la connaît déjà."""
+    classer_national("France")
+
+    appel = serveur["appels"][-1]
+    assert appel["url"].endswith("/national/ranking")
+    assert appel["corps"] == {"area": "France"}
+
+
+def test_la_trajectoire_montre_les_trois_releves_et_la_prevision():
+    """Quatre points sur l'axe : trois années observées, puis l'année cible.
+
+    C'est ce graphique qui montre ce que fait le modèle — prolonger une
+    série — là où un chiffre seul se lirait comme une mesure.
+    """
+    graphique = graphique_trajectoire(PREDICTION_NATIONALE)
+    annees = set()
+    for couche in graphique.layer:
+        donnees = couche.data
+        if donnees is not None and "annee" in donnees:
+            annees.update(donnees["annee"])
+
+    assert annees == {"2014", "2015", "2016", "2017"}
+
+
+def test_le_classement_porte_aussi_le_dernier_releve():
+    """Barre et point : la prévision, et ce qui a été observé.
+
+    Sans le repère, un écart important entre la prévision et le dernier
+    relevé — le cas des séries accidentées — passerait inaperçu.
+    """
+    graphique = graphique_classement(CLASSEMENT_NATIONAL)
+    champs = {couche.encoding.x.shorthand for couche in graphique.layer}
+
+    assert champs == {"prevision:Q", "observe:Q"}
+
+
+def test_le_mode_national_n_affiche_aucun_formulaire_de_parcelle(serveur):
+    """Le modèle national ne lit ni pluie ni température : rien ne les demande.
+
+    Les afficher serait le défaut que tout ce mode cherche à éviter : une
+    interface qui *semble* répondre aux conditions sans le faire.
+    """
+    application = AppTest.from_file(CHEMIN_APP, default_timeout=30).run()
+    application.sidebar.radio[0].set_value("Rendements nationaux").run()
+
+    assert not application.exception
+    assert len(application.slider) == 0, (
+        "les curseurs de parcelle n'ont rien à faire dans ce mode")
+    etiquettes = [boite.label for boite in application.selectbox]
+    assert any("Pays" in etiquette for etiquette in etiquettes)
+    assert any("Culture" in etiquette for etiquette in etiquettes)
+
+
+def test_le_mode_national_annonce_l_annee_predite(serveur):
+    """L'année cible doit être lisible avant même de cliquer.
+
+    C'est la réserve la plus facile à oublier : ces chiffres portent sur
+    l'année qui suit le dernier relevé FAO, pas sur la campagne en cours.
+    """
+    application = AppTest.from_file(CHEMIN_APP, default_timeout=30).run()
+    application.sidebar.radio[0].set_value("Rendements nationaux").run()
+
+    bandeaux = " ".join(info.value for info in application.info)
+    assert "2017" in bandeaux and "2016" in bandeaux
+
+
+def test_une_prevision_nationale_affiche_le_rendement_et_son_classement(serveur):
+    """Le parcours complet : choisir, estimer, lire la prévision et le rang."""
+    application = AppTest.from_file(CHEMIN_APP, default_timeout=30).run()
+    application.sidebar.radio[0].set_value("Rendements nationaux").run()
+    application.button[0].click().run()
+
+    assert not application.exception
+    mesures = [metrique.value for metrique in application.metric]
+    assert any("6,20" in mesure for mesure in mesures), mesures
+
+    # Le classement du pays suit la prévision, avec sa note et sa réserve.
+    textes = " ".join(legende.value for legende in application.caption)
+    assert "non par rentabilité" in textes
+    assert any("six prix sur dix" in alerte.value
+               for alerte in application.warning)
+
+
+def test_le_service_national_absent_laisse_les_autres_modes(serveur):
+    """Si `/national/series` échoue, l'application reste utilisable.
+
+    Les deux modes de parcelle ne dépendent pas de ce catalogue : les rendre
+    indisponibles pour une panne qui ne les concerne pas serait une
+    indisponibilité fabriquée.
+    """
+    serveur["routes"]["/national/series"] = FausseReponse(
+        {"detail": "modèle absent"}, 500)
+
+    application = AppTest.from_file(CHEMIN_APP, default_timeout=30).run()
+
+    assert not application.exception
+    assert application.sidebar.radio[0].options == ["Prédiction",
+                                                    "Recommandation"]
+    assert any("national" in alerte.value.lower()
+               for alerte in application.warning)

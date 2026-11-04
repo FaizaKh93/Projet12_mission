@@ -48,10 +48,18 @@ from agritech.config import (
     TRAIN_PATH,
     VAL_PATH,
 )
+from agritech.config import (
+    PANEL_COVARIATES,
+    PANEL_FEATURES_MODELE,
+    PANEL_FEATURES_PREVISION,
+    PANEL_TARGET,
+)
 from agritech.preprocessing import (
     FEATURES_FACULTATIVES,
     FEATURES_OBLIGATOIRES,
     FEATURES_SAISIES,
+    PANEL_SAISIES,
+    DerivationPanel,
     DerivationVariables,
 )
 
@@ -357,3 +365,164 @@ def test_artefact_autonome_en_processus_neuf(artefact_servi, tmp_path):
 
     assert resultat.returncode == 0, resultat.stderr
     assert 0 < float(resultat.stdout.strip()) < 15
+
+
+
+# --------------------------------------------------------------------------- #
+# Chaîne `real` : le transformateur du panel
+#
+# Éprouvé sur un **panel synthétique**, et non sur les données du projet. Ce
+# qu'on vérifie ici est une règle — le décalage d'un cran, le refus d'une série
+# trouée — et une règle se montre mieux sur quatre séries dont on connaît le
+# contenu que sur 53 044 lignes. Ces tests tournent donc sans `data/`, comme
+# ceux du transformateur de parcelle.
+# --------------------------------------------------------------------------- #
+
+
+def _panel(series: dict[tuple[str, str], dict[int, float]]) -> pd.DataFrame:
+    """Un panel au format du dataset, retards compris.
+
+    Les retards sont calculés comme la préparation les calcule : `lag1` est le
+    rendement de l'année précédente **si elle existe**, sinon `NaN`. C'est ce
+    qui permet aux tests de distinguer une série continue d'une série trouée
+    sans écrire les valeurs à la main.
+    """
+    lignes = []
+    for (aire, culture), rendements in series.items():
+        for annee, rendement in sorted(rendements.items()):
+            ligne = {"Area": aire, "Item": culture, "Year": annee,
+                     PANEL_TARGET: rendement, "choc": 0.0}
+            for rang, retard in enumerate(PANEL_FEATURES_PREVISION, start=1):
+                ligne[retard] = rendements.get(annee - rang, float("nan"))
+            for covariable in PANEL_COVARIATES:
+                ligne[covariable] = 20.0
+            lignes.append(ligne)
+    return pd.DataFrame(lignes)
+
+
+#: Quatre séries choisies pour couvrir les quatre cas qui comptent.
+SERIES_ESSAI = {
+    # Continue jusqu'à l'année de référence : servable.
+    ("Atlantis", "Wheat"): {annee: 3.0 + annee / 1000
+                            for annee in range(2010, 2017)},
+    # S'interrompt en 2014 : son `lag1` ne serait pas le rendement de l'an
+    # dernier, la série est écartée.
+    ("Atlantis", "Maize"): {annee: 8.0 + annee / 1000
+                            for annee in range(2010, 2015)},
+    # Trop courte : en 2016, elle n'a pas trois ans d'historique derrière elle.
+    ("Borduria", "Rice, paddy"): {2015: 4.0, 2016: 4.2},
+    # Seule culture de son pays : il n'y a rien à classer.
+    ("Syldavia", "Potatoes"): {annee: 20.0 + annee / 100
+                               for annee in range(2008, 2017)},
+}
+
+
+@pytest.fixture(scope="module")
+def derivation_panel():
+    """Le transformateur ajusté sur le panel synthétique."""
+    return DerivationPanel().fit(_panel(SERIES_ESSAI))
+
+
+def test_panel_annee_de_reference_est_la_derniere_observee(derivation_panel):
+    """L'année prédite est celle qui suit le dernier relevé, pas une autre."""
+    assert derivation_panel.annee_reference_ == 2016
+    assert derivation_panel.annee_predite_ == 2017
+
+
+def test_panel_ne_sert_que_les_series_continues(derivation_panel):
+    """Deux séries sur quatre sont servables, et ce sont les bonnes.
+
+    `Atlantis/Maize` s'arrête en 2014 : servir son relevé de 2014 comme
+    « l'an dernier » décalerait la prévision de deux ans sans le dire.
+    `Borduria/Rice, paddy` n'a que deux années : son troisième retard manque.
+    """
+    assert derivation_panel.couples_servables_ == [("Atlantis", "Wheat"),
+                                                   ("Syldavia", "Potatoes")]
+
+
+def test_panel_decale_les_retards_d_un_cran(derivation_panel):
+    """`lag1` est le relevé de l'année de référence, et non son propre `lag1`.
+
+    C'est l'erreur que ce décalage évite : reprendre la ligne de 2016 telle
+    quelle prédirait 2016, pas 2017. Les valeurs attendues se lisent
+    directement dans la série d'essai.
+    """
+    serie = SERIES_ESSAI[("Atlantis", "Wheat")]
+    assert derivation_panel.retards("Atlantis", "Wheat") == {
+        "lag1": serie[2016], "lag2": serie[2015], "lag3": serie[2014]}
+
+
+def test_panel_transform_rend_les_colonnes_du_modele(derivation_panel):
+    """Les 8 colonnes attendues, dans l'ordre, avec les covariables à `NaN`.
+
+    Les covariables portent sur l'année à prédire : les laisser vides fait
+    jouer l'imputeur du Pipeline, qui y met la médiane de `train`. Y glisser
+    une valeur reviendrait à inventer une température.
+    """
+    sortie = derivation_panel.transform(
+        pd.DataFrame({"Area": ["Atlantis"], "Item": ["Wheat"]}))
+
+    assert list(sortie.columns) == list(PANEL_FEATURES_MODELE)
+    assert sortie[PANEL_COVARIATES].isna().all().all()
+    assert sortie[PANEL_FEATURES_PREVISION].notna().all().all()
+    assert sortie[list(PANEL_FEATURES_PREVISION)].dtypes.eq("float64").all()
+
+
+def test_panel_get_feature_names_out_decrit_la_sortie(derivation_panel):
+    """Le `ColumnTransformer` en aval route les colonnes par leur nom."""
+    assert (list(derivation_panel.get_feature_names_out())
+            == list(PANEL_FEATURES_MODELE))
+
+
+@pytest.mark.parametrize("couple, motif", [
+    (("Atlantis", "Quinoa"), "culture jamais cultivée là"),
+    (("Narnia", "Wheat"), "pays absent du panel"),
+    (("Atlantis", "Maize"), "série interrompue avant l'année de référence"),
+])
+def test_panel_refuse_un_couple_non_servable(derivation_panel, couple, motif):
+    """Un couple hors table est refusé, pas servi avec une imputation.
+
+    Le troisième cas est le plus instructif : la série existe dans le panel,
+    mais pas jusqu'au bout. L'accepter ferait passer un relevé de 2014 pour
+    celui de l'an dernier — une prédiction fausse sans aucun signal.
+    """
+    entree = pd.DataFrame([dict(zip(PANEL_SAISIES, couple))])
+    with pytest.raises(ValueError, match="non servable"):
+        derivation_panel.transform(entree)
+
+
+def test_panel_refuse_une_saisie_absente(derivation_panel):
+    """Sans la culture, il n'y a aucune série dont chercher l'historique."""
+    with pytest.raises(ValueError, match="Saisies absentes"):
+        derivation_panel.transform(pd.DataFrame({"Area": ["Atlantis"]}))
+
+
+def test_panel_fit_exige_le_panel_complet():
+    """Ajuster sur des données sans retards ne peut pas marcher à moitié."""
+    with pytest.raises(ValueError, match="panel complet"):
+        DerivationPanel().fit(pd.DataFrame({"Area": ["Atlantis"],
+                                            "Item": ["Wheat"]}))
+
+
+def test_panel_cultures_par_pays_est_le_vocabulaire_servi(derivation_panel):
+    """C'est cette table que l'interface lit, d'où son ordre déterministe."""
+    assert derivation_panel.cultures_par_pays() == {
+        "Atlantis": ["Wheat"], "Syldavia": ["Potatoes"]}
+
+
+def test_panel_table_ne_reference_pas_pyarrow(derivation_panel, tmp_path):
+    """Sérialisée, la table ne doit citer aucun paquet absent de l'image.
+
+    `MultiIndex.from_arrays` ré-infère les niveaux en chaînes adossées à
+    pyarrow, **même nourri de tableaux `object`** : sans le `set_levels` du
+    transformateur, l'artefact se recharge ici et échoue dans le conteneur,
+    où le groupe `api` du lock n'installe pas pyarrow. Mesuré : `joblib.load`
+    y lève alors `ImportError: pyarrow`.
+    """
+    chemin = tmp_path / "derivation_panel.joblib"
+    joblib.dump(derivation_panel, chemin)
+
+    motif = (rb"(?<![a-zA-Z_])(?:pyarrow|optuna|shap|lightgbm|mlflow)"
+             rb"(?![a-zA-Z])[a-zA-Z_.]*")
+    cites = sorted({m.decode() for m in re.findall(motif, chemin.read_bytes())})
+    assert not cites, f"dépendances hors de l'image de l'API : {cites}"

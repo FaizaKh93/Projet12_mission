@@ -1,10 +1,19 @@
 """Assemble, vérifie et publie l'artefact que l'API servira.
 
-**Ce que ce script résout.** Le modèle retenu à l'étape 2 attend les 13
-colonnes du dataset consolidé ; l'agriculteur n'en saisira que 8. Déployer tel
-quel échouerait sur `columns are missing`. Ce script greffe le transformateur
-de dérivation devant le modèle, gèle l'ensemble, et publie le résultat comme un
-artefact de service à part entière.
+**Ce que ce script résout.** Le modèle retenu à l'étape 2 attend plus de
+colonnes que l'appelant n'en connaît. Déployer tel quel échouerait sur
+`columns are missing`. Ce script greffe le transformateur de dérivation devant
+le modèle, gèle l'ensemble, et publie le résultat comme un artefact de service
+à part entière.
+
+**Deux chaînes, un seul script.** `--source simulated` sert les parcelles : 13
+colonnes attendues, 8 saisies fournies, les 5 autres *calculées*.
+`--source real` sert le panel FAO : 8 colonnes attendues, 2 saisies fournies —
+le pays et la culture — les 3 retards étant *cherchés* dans l'historique
+embarqué et les 3 covariables de l'année cible restant inconnues avant la
+récolte. Ce qui distingue les deux chaînes est déclaré une fois dans
+`CHAINES_DE_SERVICE` ; le reste du script lit le descripteur, exactement comme
+l'entraînement lit `JEUX_DE_VARIABLES`.
 
 **Ce qu'il ne réentraîne pas : rien.** Le modèle vient du registre, inchangé.
 `FrozenEstimator` porte sur le Pipeline **entier**, pas sur son dernier étage :
@@ -17,9 +26,9 @@ exactement comme sa source ne doit pas atteindre le disque, et encore moins le
 registre : c'est le point précis où un projet de ML se casse sans bruit.
 
 **Ce qu'il ne fait pas : promouvoir.** La version est publiée sans alias. Le
-`champion` de `agritech-rendement-api` ne se pose qu'après les tests
-d'intégration de l'API, et la commande pour le faire est affichée en fin
-d'exécution. Publier n'est pas déclarer prêt à servir.
+`champion` du registre de service ne se pose qu'après les tests d'intégration
+de l'API, et la commande pour le faire est affichée en fin d'exécution.
+Publier n'est pas déclarer prêt à servir.
 
 Exemples :
 
@@ -29,8 +38,11 @@ Exemples :
     # Export complet : .joblib déployable + version au registre
     uv run python scripts/export_api_model.py
 
+    # La chaîne du panel FAO : (pays, culture) -> rendement national
+    uv run python scripts/export_api_model.py --source real
+
     # Promotion : pose l'alias champion, sans rien réexporter
-    uv run python scripts/export_api_model.py --promouvoir
+    uv run python scripts/export_api_model.py --source real --promouvoir
 """
 
 from __future__ import annotations
@@ -41,6 +53,8 @@ import json
 import os
 import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, NamedTuple
 
 import joblib
 import numpy as np
@@ -53,22 +67,41 @@ from agritech.config import (
     ALIAS_CHAMPION,
     API_METADATA_PATH,
     API_MODEL_PATH,
+    API_PANEL_METADATA_PATH,
+    API_PANEL_MODEL_PATH,
     FEATURES_BOOLEENNES,
     FEATURES_MODELE,
     FEATURES_NUMERIQUES,
     FINAL_MODEL_PATH,
+    PANEL_ANNEE_PREDITE,
+    PANEL_ANNEE_REFERENCE,
+    PANEL_COVARIATES,
+    PANEL_DATASET_PARQUET_PATH,
+    PANEL_FEATURES_MODELE,
+    PANEL_FEATURES_PREVISION,
+    PANEL_FINAL_MODEL_PATH,
+    PANEL_INTERVALLE_PLANCHER_95_T_HA,
+    PANEL_INTERVALLE_RELATIF_95,
+    PANEL_PREDICTION_MINIMALE_T_HA,
+    PANEL_TARGET,
     PROJECT_ROOT,
     REGISTERED_MODEL_API,
     REGISTERED_MODEL_NAME,
+    REGISTERED_MODEL_PANEL,
+    REGISTERED_MODEL_PANEL_API,
+    SOURCES,
     TARGET,
 )
 from agritech.preprocessing import (
     FEATURES_FACULTATIVES,
     FEATURES_OBLIGATOIRES,
     FEATURES_SAISIES,
+    PANEL_SAISIES,
+    DerivationPanel,
     DerivationVariables,
 )
 from agritech.training import (
+    JEUX_DE_VARIABLES,
     SOURCE_PAR_DEFAUT,
     charger_partitions,
     configurer_mlflow,
@@ -81,6 +114,66 @@ from agritech.training import (
 #: `.joblib` (pickle standard) et n'a que faire de cloudpickle, là où l'artefact
 #: du registre en dépend sans rien connaître de FastAPI.
 GROUPE_DEPENDANCES = "artefact"
+
+
+class ChaineDeService(NamedTuple):
+    """Tout ce qui distingue l'export d'une chaîne de celui de l'autre.
+
+    Même intention que `JeuDeVariables` du côté entraînement : les différences
+    sont déclarées **une fois**, et les fonctions du script lisent le
+    descripteur plutôt que de tester la source. Ce qui ne peut pas se réduire à
+    une valeur — comment ajuster le transformateur, comment prouver la parité —
+    est porté par les quatre appelables du bas, dont les implémentations sont
+    propres à chaque chaîne.
+    """
+
+    #: Le mot de `--source`, celui qu'emploient déjà les autres scripts
+    source: str
+    #: Registre d'où vient le modèle retenu à l'étape 2
+    registre_source: str
+    #: Registre où la version **de service** est publiée
+    registre_api: str
+    #: Le `.joblib` du modèle retenu, dont on vérifie qu'il dit la même chose
+    #: que le registre
+    modele_final: Path
+    #: L'artefact déployable, et sa provenance, que l'image embarque
+    chemin_artefact: Path
+    chemin_provenance: Path
+    #: Les saisies du contrat d'entrée, et leur partage obligatoire/facultatif
+    saisies: list[str]
+    obligatoires: list[str]
+    facultatives: list[str]
+    #: Les colonnes que le modèle d'étude attend, et sa cible
+    features_modele: list[str]
+    cible: str
+    #: Valeur du tag qui résume le contrat, reprise dans la provenance
+    schema_entree: str
+    #: Variable d'environnement qui fait servir cette chaîne depuis le
+    #: registre plutôt que depuis le `.joblib` embarqué. Écrite ici pour que
+    #: la commande affichée après une promotion soit la bonne ; `api/service`
+    #: lit les mêmes noms, et un test confronte les deux.
+    variable_uri: str
+    #: Nom de la métrique MLflow qui chiffre ce que l'appelant ne fournit pas.
+    #: Distinct d'une chaîne à l'autre parce qu'il ne mesure pas la même
+    #: chose : l'omission de champs facultatifs d'un côté, l'imputation de
+    #: covariables inconnues de l'autre.
+    metrique_ecart: str
+    #: Clés que la provenance porte **en plus** des clés communes, et que la
+    #: promotion doit donc contrôler aussi. Vides sur les parcelles : leur
+    #: artefact n'a rien de plus à déclarer que son modèle d'origine.
+    cles_supplementaires: tuple[str, ...]
+    #: Les données du fit du transformateur, et le témoin de parité
+    charger: Callable
+    #: Greffe le transformateur devant le modèle et gèle l'ensemble
+    construire: Callable
+    #: Toutes les vérifications, avant la moindre écriture
+    verifier: Callable
+    #: L'entrée de service sur laquelle les rechargements sont éprouvés
+    entree: Callable
+    #: Les trois lignes d'exemple attachées à la version du registre
+    exemple: Callable
+    #: Ce que l'artefact ajoute à sa provenance, lu dans son propre état
+    metadonnees: Callable
 
 
 def empreinte(chemin) -> str:
@@ -141,13 +234,14 @@ def dependances_verrouillees(groupe: str) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
-def construire_signature():
-    """Déclare le contrat : 5 saisies exigées, 3 facultatives.
+def construire_signature(chaine: ChaineDeService):
+    """Déclare le contrat : les saisies exigées, puis les facultatives.
 
     MLflow n'impose que les premières ; une facultative absente traverse le
     contrôle de schéma sans erreur et la sentinelle du transformateur s'en
     charge. Une obligatoire absente, elle, est rejetée avant d'atteindre le
-    modèle.
+    modèle. Sur la chaîne du panel, tout est obligatoire : sans le pays ni la
+    culture, il n'y a aucun historique à chercher.
 
     `infer_signature` ne saurait pas produire ceci : un exemple complet ne dit
     pas quelles colonnes étaient facultatives. D'où la construction explicite,
@@ -169,24 +263,76 @@ def construire_signature():
             return DataType.boolean
         return DataType.string
 
-    colonnes = [ColSpec(type_mlflow(c), c) for c in FEATURES_OBLIGATOIRES]
+    colonnes = [ColSpec(type_mlflow(c), c) for c in chaine.obligatoires]
     colonnes += [ColSpec(type_mlflow(c), c, required=False)
-                 for c in FEATURES_FACULTATIVES]
+                 for c in chaine.facultatives]
 
-    return ModelSignature(inputs=Schema(colonnes),
-                          outputs=Schema([ColSpec(DataType.double, TARGET)]))
+    return ModelSignature(
+        inputs=Schema(colonnes),
+        outputs=Schema([ColSpec(DataType.double, chaine.cible)]))
 
 
-def exemple_entree(val: pd.DataFrame) -> pd.DataFrame:
+def exemple_parcelle(artefact, temoin: pd.DataFrame) -> pd.DataFrame:
     """Trois lignes réelles, pour que l'interface MLflow montre un appel valide.
 
     Les colonnes entières sont converties en flottantes : un entier ne porte pas
     de valeur manquante, et le contrôle de schéma refuserait un appel légitime.
     """
-    exemple = val[FEATURES_SAISIES].head(3).copy()
+    exemple = temoin[FEATURES_SAISIES].head(3).copy()
     for colonne in FEATURES_NUMERIQUES:
         exemple[colonne] = exemple[colonne].astype("float64")
     return exemple
+
+
+def exemple_panel(artefact, temoin: pd.DataFrame) -> pd.DataFrame:
+    """Trois couples (pays, culture) **pris dans la table embarquée**.
+
+    Pas dans `val` : ses lignes sont des années 2003-2009, et un exemple tiré
+    de là laisserait croire que l'appelant choisit l'année. Il ne la choisit
+    pas — le service en sert une seule, celle qui suit l'année de référence.
+    """
+    couples = _derivation(artefact).couples_servables_
+    indices = [0, len(couples) // 2, len(couples) - 1]
+    return pd.DataFrame([dict(zip(PANEL_SAISIES, couples[indice]))
+                         for indice in indices])
+
+
+def entree_parcelle(artefact, val: pd.DataFrame) -> pd.DataFrame:
+    """Ce qu'un appelant envoie : les 8 saisies, sur toutes les lignes de val."""
+    return val[FEATURES_SAISIES]
+
+
+def entree_panel(artefact, val: pd.DataFrame) -> pd.DataFrame:
+    """Tous les couples servables, c'est-à-dire tout ce que l'API acceptera.
+
+    Pas `val[["Area", "Item"]]` : l'artefact servirait alors les retards de
+    l'année de référence à des lignes de 2003-2009, et la comparaison ne
+    voudrait rien dire. L'entrée de service **est** la liste des couples.
+    """
+    return pd.DataFrame(_derivation(artefact).couples_servables_,
+                        columns=PANEL_SAISIES)
+
+
+def metadonnees_parcelle(artefact) -> dict:
+    """Rien à ajouter : la provenance du modèle d'origine dit tout."""
+    return {}
+
+
+def metadonnees_panel(artefact) -> dict:
+    """Ce que l'artefact du panel doit déclarer de lui-même.
+
+    L'année prédite est une **propriété de la table embarquée**, pas une
+    option de l'API : sans elle dans la provenance, un conteneur ne pourrait
+    pas dire sur quelle année porte ce qu'il sert. Le nombre de couples, lui,
+    fait qu'une table remplacée ne passe pas inaperçue au contrôle de
+    concordance.
+    """
+    derivation = _derivation(artefact)
+    return {
+        "annee_reference": derivation.annee_reference_,
+        "annee_predite": derivation.annee_predite_,
+        "couples_servables": len(derivation.couples_servables_),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -194,10 +340,10 @@ def exemple_entree(val: pd.DataFrame) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 
 
-def resoudre_source(mlflow):
+def resoudre_source(mlflow, chaine: ChaineDeService):
     """Récupère au registre la version que l'alias `champion` désigne.
 
-    La source est le **registre**, pas `models/modele_final.joblib` : c'est la
+    La source est le **registre**, pas le `.joblib` du modèle retenu : c'est la
     version taguée qui porte la traçabilité — run d'origine, empreintes de
     données, métriques. Partir du fichier laisserait une dérive silencieuse
     possible entre les deux ; on vérifie d'ailleurs qu'ils coïncident.
@@ -206,18 +352,19 @@ def resoudre_source(mlflow):
 
     client = MlflowClient()
     try:
-        version = client.get_model_version_by_alias(REGISTERED_MODEL_NAME,
+        version = client.get_model_version_by_alias(chaine.registre_source,
                                                     ALIAS_CHAMPION)
     except Exception as erreur:
         raise RuntimeError(
-            f"Aucun alias « {ALIAS_CHAMPION} » sur {REGISTERED_MODEL_NAME}. "
-            f"Le choix du modèle se fait dans notebooks/model_experimentation."
-            f"ipynb, qui appelle promouvoir_champion(). ({erreur})"
+            f"Aucun alias « {ALIAS_CHAMPION} » sur {chaine.registre_source}. "
+            f"Le choix du modèle se fait dans le notebook de comparaison de "
+            f"cette chaîne, qui appelle promouvoir_champion("
+            f"source={chaine.source!r}). ({erreur})"
         ) from erreur
 
-    uri = f"models:/{REGISTERED_MODEL_NAME}@{ALIAS_CHAMPION}"
-    print(f"=== Source : le modèle retenu à l'étape 2 ===")
-    print(f"  {REGISTERED_MODEL_NAME} version {version.version} "
+    uri = f"models:/{chaine.registre_source}@{ALIAS_CHAMPION}"
+    print(f"=== Source : le modèle retenu à l'étape 2 ({chaine.source}) ===")
+    print(f"  {chaine.registre_source} version {version.version} "
           f"({version.tags.get('modele', '?')}) <- alias {ALIAS_CHAMPION}")
     print(f"  run d'origine : {version.run_id}")
     print(f"  données       : {version.tags.get('data_version')} / "
@@ -230,7 +377,40 @@ def resoudre_source(mlflow):
 # --------------------------------------------------------------------------- #
 
 
-def construire_artefact(source, train: pd.DataFrame) -> FrozenEstimator:
+def _derivation(artefact: FrozenEstimator):
+    """Le transformateur, sous les deux enveloppes du gel et du Pipeline.
+
+    L'API descend par le même chemin pour lire la table embarquée : c'est le
+    seul endroit où l'ordre des étages est connu, et le nommer ici évite de le
+    recopier ailleurs.
+    """
+    return artefact.estimator.named_steps["derivation"]
+
+
+def charger_parcelle(echantillon: int | None):
+    """Les données du fit du transformateur, et le témoin de parité."""
+    return charger_partitions(echantillon=echantillon)
+
+
+def charger_panel(echantillon: int | None):
+    """Le panel **complet** pour la table de retards, `val` pour la parité.
+
+    Le transformateur ne s'ajuste pas sur `train` ici, et ce n'est pas une
+    entorse : les retards sont une entrée de service, et `train` s'arrête en
+    2002. Ajuster la table sur lui ferait servir des retards vieux de quatorze
+    ans. Le modèle, lui, reste celui du registre et n'a rien vu après 2002.
+
+    `echantillon` ne tronque que le témoin de parité : une table de service
+    construite sur un panel partiel n'aurait pas les mêmes couples, et son
+    artefact ne doit de toute façon jamais être publié — d'où `--sample` qui
+    implique `--verifier-seulement`.
+    """
+    panel = pd.read_parquet(PANEL_DATASET_PARQUET_PATH)
+    (_, val) = charger_partitions(echantillon=echantillon, source="real")
+    return panel, val
+
+
+def construire_parcelle(source, ajustement: pd.DataFrame) -> FrozenEstimator:
     """Greffe le transformateur devant le modèle et gèle l'ensemble.
 
     Le gel porte sur le Pipeline entier. Geler le seul estimateur laisserait
@@ -238,9 +418,26 @@ def construire_artefact(source, train: pd.DataFrame) -> FrozenEstimator:
     données d'appel, et les prédictions changeraient sans qu'aucune erreur ne
     le signale.
     """
-    derivation = DerivationVariables().fit(train)
-    print(f"  table FAO ajustée sur {len(train):,} lignes, "
+    derivation = DerivationVariables().fit(ajustement)
+    print(f"  table FAO ajustée sur {len(ajustement):,} lignes, "
           f"{len(derivation.cultures_connues_)} cultures")
+    return FrozenEstimator(Pipeline([("derivation", derivation),
+                                     ("modele", source)]))
+
+
+def construire_panel(source, ajustement: pd.DataFrame) -> FrozenEstimator:
+    """Même greffe, avec la table des derniers retards connus.
+
+    Le gel compte davantage encore ici : un `fit()` accidentel réajusterait la
+    table sur les données d'appel, c'est-à-dire sur deux colonnes dépourvues
+    d'historique, et le transformateur refuserait ensuite tous les couples.
+    """
+    derivation = DerivationPanel().fit(ajustement)
+    print(f"  table de retards ajustée sur {len(ajustement):,} lignes : "
+          f"{len(derivation.couples_servables_)} couples servables, "
+          f"{len(derivation.cultures_par_pays())} pays")
+    print(f"  année de référence {derivation.annee_reference_} -> "
+          f"prévision {derivation.annee_predite_}")
     return FrozenEstimator(Pipeline([("derivation", derivation),
                                      ("modele", source)]))
 
@@ -261,7 +458,8 @@ def exiger_parite(libelle: str, obtenu: np.ndarray, reference: np.ndarray) -> No
     print(f"  {libelle:<44} écart max {ecart:.2e}")
 
 
-def verifier_avant_ecriture(artefact, source, val: pd.DataFrame) -> float:
+def verifier_parcelle(chaine: ChaineDeService, artefact, source,
+                      ajustement: pd.DataFrame, val: pd.DataFrame) -> float:
     """Toutes les vérifications, avant la moindre écriture.
 
     Renvoie l'écart moyen introduit par l'omission des trois champs
@@ -271,8 +469,8 @@ def verifier_avant_ecriture(artefact, source, val: pd.DataFrame) -> float:
     reference = source.predict(val[FEATURES_MODELE])
 
     print("\n=== Intégrité de la source ===")
-    exiger_parite("registre == models/modele_final.joblib",
-                  joblib.load(FINAL_MODEL_PATH).predict(val[FEATURES_MODELE]),
+    exiger_parite(f"registre == models/{chaine.modele_final.name}",
+                  joblib.load(chaine.modele_final).predict(val[FEATURES_MODELE]),
                   reference)
 
     print("\n=== Parité de l'artefact de service ===")
@@ -293,7 +491,7 @@ def verifier_avant_ecriture(artefact, source, val: pd.DataFrame) -> float:
     # Un `fit()` accidentel ne doit pas toucher aux coefficients.
     interne = artefact.estimator.named_steps["modele"].named_steps["modele"]
     avant = interne.coef_.copy()
-    artefact.fit(val[FEATURES_SAISIES], val[TARGET])
+    artefact.fit(val[FEATURES_SAISIES], val[chaine.cible])
     if not np.array_equal(avant, interne.coef_):
         raise RuntimeError("Le gel ne protège pas le modèle. Rien n'a été écrit.")
     print(f"  {'fit() accidentel : coefficients inchangés':<44} OK")
@@ -301,51 +499,269 @@ def verifier_avant_ecriture(artefact, source, val: pd.DataFrame) -> float:
     return ecart_sans
 
 
-# --------------------------------------------------------------------------- #
-# 5. Publication
-# --------------------------------------------------------------------------- #
+def verifier_panel(chaine: ChaineDeService, artefact, source,
+                   panel: pd.DataFrame, val: pd.DataFrame) -> float:
+    """Les mêmes exigences, sur la chaîne où l'historique est l'entrée.
 
+    Renvoie l'écart moyen dû à l'imputation des trois covariables, mesuré sur
+    `val` — l'équivalent ici de l'omission des champs facultatifs.
 
-def publier(mlflow, artefact, source, version_source, val: pd.DataFrame,
-            ecart_sans: float) -> int:
-    """Écrit le `.joblib`, publie au registre, puis **revérifie les trois
-    chemins de rechargement**.
-
-    Trois chemins, parce qu'ils ne contrôlent pas la même chose :
-
-    - le `.joblib` est ce que l'image Docker embarquera ;
-    - `mlflow.sklearn.load_model` rend l'objet brut, **sans** appliquer la
-      signature : il passerait même si celle-ci était fausse ;
-    - `mlflow.pyfunc.load_model` l'applique. C'est le seul qui valide le
-      contrat d'entrée, et c'est aussi ce que chargerait un serveur MLflow.
+    **La parité ne peut pas se vérifier sur l'année prédite** : elle n'est pas
+    observée, et aucune ligne du panel ne porte ses colonnes. On la vérifie
+    donc un cran plus tôt. Une table ajustée sur le panel privé de sa dernière
+    année doit reproduire, pour cette dernière année, exactement les retards
+    que le dataset y porte — et donc exactement les prédictions du champion.
+    C'est ce contrôle qui atteste du décalage d'un cran ; une table qui
+    reprendrait les lignes telles quelles échouerait ici.
     """
-    reference = source.predict(val[FEATURES_MODELE])
-    exigences = dependances_verrouillees(GROUPE_DEPENDANCES)
+    reference = source.predict(_sans_covariables(val[chaine.features_modele]))
+    derivation = _derivation(artefact)
 
-    print(f"\n=== Dépendances de désérialisation (groupe « "
-          f"{GROUPE_DEPENDANCES} » du lock) ===")
-    print(f"  {len(exigences)} paquets épinglés : "
-          f"{', '.join(exigences[:4])}...")
+    print("\n=== Intégrité de la source ===")
+    exiger_parite(f"registre == models/{chaine.modele_final.name}",
+                  joblib.load(chaine.modele_final).predict(
+                      _sans_covariables(val[chaine.features_modele])),
+                  reference)
 
-    print("\n=== Écriture ===")
-    API_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(artefact, API_MODEL_PATH)
-    taille_ko = API_MODEL_PATH.stat().st_size / 1024
-    sceau = empreinte(API_MODEL_PATH)
-    print(f"  {API_MODEL_PATH.name:<28} {taille_ko:>7.1f} Ko  "
-          f"sha256 {sceau[:12]}…")
+    if derivation.annee_reference_ != PANEL_ANNEE_REFERENCE:
+        raise RuntimeError(
+            f"Le panel s'arrête en {derivation.annee_reference_}, "
+            f"`PANEL_ANNEE_REFERENCE` annonce {PANEL_ANNEE_REFERENCE}. Le "
+            "contrat de l'API et la table servie décriraient deux années "
+            "différentes : corriger `config.py` avant d'exporter."
+        )
 
-    empreintes = versions_des_donnees()
-    etiquettes = {
-        **empreintes,
+    print("\n=== Parité de l'artefact de service ===")
+    print(f"  {len(chaine.features_modele)} colonnes attendues -> "
+          f"{len(chaine.saisies)} saisies ({', '.join(chaine.saisies)}), "
+          f"{len(PANEL_FEATURES_PREVISION)} retards cherchés, "
+          f"{len(PANEL_COVARIATES)} covariables imputées")
+
+    # Le décalage d'un cran, éprouvé contre le dataset lui-même.
+    veille = DerivationPanel().fit(
+        panel[panel["Year"] < derivation.annee_reference_])
+    attendu = panel[panel["Year"] == derivation.annee_reference_].set_index(
+        PANEL_SAISIES)
+    couples = [couple for couple in veille.couples_servables_
+               if couple in attendu.index]
+    entree = pd.DataFrame(couples, columns=PANEL_SAISIES)
+    reconstitue = veille.transform(entree)
+
+    exiger_parite(
+        f"retards reconstitués pour {derivation.annee_reference_}",
+        reconstitue[PANEL_FEATURES_PREVISION].to_numpy(),
+        attendu.loc[couples, PANEL_FEATURES_PREVISION].to_numpy())
+    exiger_parite(
+        f"prédictions sur {len(couples):,} couples de "
+        f"{derivation.annee_reference_}",
+        artefact.estimator.named_steps["modele"].predict(reconstitue),
+        source.predict(_sans_covariables(
+            attendu.loc[couples].reset_index()[chaine.features_modele])))
+
+    # Seule mesure attendue non nulle : les trois covariables portent sur
+    # l'année à prédire, inconnue avant la récolte. Mesuré à 0,049 t/ha sur
+    # `val` — pour une contribution SHAP de 1,1 %.
+    avec = source.predict(val[chaine.features_modele])
+    ecart_imputation = float(np.abs(reference - avec).mean())
+    print(f"  {'covariables de l année cible imputées':<44} "
+          f"écart moyen {ecart_imputation:.4f} t/ha")
+
+    _exiger_calibration(source, val, chaine)
+
+    # Un couple absent de la table doit être refusé, non servi avec une
+    # imputation : une médiane mondiale passée pour l'historique d'un pays
+    # serait une prédiction sans fondement.
+    try:
+        artefact.predict(pd.DataFrame([{"Area": "Narnia", "Item": "Wheat"}]))
+    except ValueError:
+        print(f"  {'couple hors table : refusé':<44} OK")
+    else:
+        raise RuntimeError("Le transformateur sert un couple qu'il ignore.")
+
+    # Un `fit()` accidentel ne doit toucher ni le modèle ni la table. On
+    # compare les **prédictions** et non les coefficients : le champion de
+    # cette chaîne pourrait demain être un modèle qui n'en a pas.
+    avant = artefact.predict(entree.head(50))
+    artefact.fit(entree.head(50), np.zeros(50))
+    if not np.array_equal(avant, artefact.predict(entree.head(50))):
+        raise RuntimeError("Le gel ne protège pas l'artefact. Rien n'a été écrit.")
+    print(f"  {'fit() accidentel : prédictions inchangées':<44} OK")
+
+    return ecart_imputation
+
+
+def _sans_covariables(lignes: pd.DataFrame) -> pd.DataFrame:
+    """Les colonnes du modèle, privées de ce que le service ne saura pas.
+
+    Sert de témoin : c'est l'entrée que le champion recevra en production, et
+    c'est donc à elle que la parité de l'artefact doit se mesurer.
+    """
+    prive = lignes.copy()
+    prive[PANEL_COVARIATES] = np.nan
+    return prive
+
+
+def _exiger_calibration(source, val: pd.DataFrame,
+                        chaine: ChaineDeService) -> None:
+    """Les bornes de `config.py` décrivent-elles encore ce modèle ?
+
+    Les quatre constantes de l'intervalle empirique ont été calibrées sur `val`
+    pour un modèle donné. Un réentraînement les laisserait en place en silence,
+    et l'API publierait une couverture qu'elle n'a plus. Ce contrôle les
+    recalcule et refuse d'exporter si elles ont dérivé — avec les valeurs à
+    inscrire, pour que la correction ne demande pas de deviner.
+    """
+    prediction = source.predict(_sans_covariables(val[chaine.features_modele]))
+    residu = val[chaine.cible].to_numpy() - prediction
+
+    base = np.clip(prediction, PANEL_PREDICTION_MINIMALE_T_HA, None)
+    relatif = tuple(np.quantile(residu / base, [0.025, 0.975]))
+    bas = prediction < 1.0
+    plancher = tuple(np.quantile(residu[bas], [0.025, 0.975]))
+
+    ecarts = {
+        "PANEL_INTERVALLE_RELATIF_95": (
+            relatif, PANEL_INTERVALLE_RELATIF_95,
+            max(abs(obtenu - attendu) for obtenu, attendu
+                in zip(relatif, PANEL_INTERVALLE_RELATIF_95)), 0.01),
+        "PANEL_INTERVALLE_PLANCHER_95_T_HA": (
+            plancher, PANEL_INTERVALLE_PLANCHER_95_T_HA,
+            max(abs(obtenu - attendu) for obtenu, attendu
+                in zip(plancher, PANEL_INTERVALLE_PLANCHER_95_T_HA)), 0.02),
+    }
+    derive = {nom: valeurs for nom, valeurs in ecarts.items()
+              if valeurs[2] > valeurs[3]}
+    if derive:
+        details = "\n".join(
+            f"  {nom} : config {attendu}, recalculé "
+            f"({obtenu[0]:+.4f}, {obtenu[1]:+.4f}) — écart {ecart:.4f} "
+            f"> {tolerance}"
+            for nom, (obtenu, attendu, ecart, tolerance) in derive.items())
+        raise RuntimeError(
+            "CALIBRATION PÉRIMÉE — les bornes de l'intervalle ne décrivent "
+            f"plus ce modèle.\n{details}\n"
+            "  Mettre `config.py` à jour avec les valeurs recalculées, puis "
+            "remesurer la couverture sur `test` avant d'exporter.")
+
+    print(f"  {'bornes de l intervalle : conformes à config':<44} "
+          f"relatif ({relatif[0]:+.3f}, {relatif[1]:+.3f}) | "
+          f"plancher ({plancher[0]:+.3f}, {plancher[1]:+.3f})")
+
+
+# --------------------------------------------------------------------------- #
+# Les deux chaînes de service
+#
+# Déclarées **après** les fonctions qu'elles désignent : un descripteur qui
+# porte des appelables ne peut pas précéder leur définition. Tout ce que le
+# reste du script a besoin de savoir d'une chaîne est ici.
+#
+# Et déclarées par des **fabriques** plutôt que par une table figée : les
+# chemins sont alors relus dans les constantes du module à chaque appel. Une
+# table construite à l'import les capturerait une fois pour toutes, et un test
+# qui détourne `API_MODEL_PATH` vers un dossier temporaire écrirait malgré
+# tout dans `models/` — éprouvé, et c'est exactement ce qui s'est produit.
+# --------------------------------------------------------------------------- #
+
+
+def _chaine_parcelle() -> ChaineDeService:
+    """La chaîne des parcelles simulées : 13 colonnes, 8 saisies."""
+    return ChaineDeService(
+        source="simulated",
+        registre_source=REGISTERED_MODEL_NAME,
+        registre_api=REGISTERED_MODEL_API,
+        modele_final=FINAL_MODEL_PATH,
+        chemin_artefact=API_MODEL_PATH,
+        chemin_provenance=API_METADATA_PATH,
+        saisies=FEATURES_SAISIES,
+        obligatoires=FEATURES_OBLIGATOIRES,
+        facultatives=FEATURES_FACULTATIVES,
+        features_modele=FEATURES_MODELE,
+        cible=TARGET,
+        schema_entree=f"{len(FEATURES_SAISIES)}-saisies",
+        variable_uri="AGRITECH_MODEL_URI",
+        metrique_ecart="ecart_sans_facultatives",
+        cles_supplementaires=(),
+        charger=charger_parcelle,
+        construire=construire_parcelle,
+        verifier=verifier_parcelle,
+        entree=entree_parcelle,
+        exemple=exemple_parcelle,
+        metadonnees=metadonnees_parcelle,
+    )
+
+
+def _chaine_panel() -> ChaineDeService:
+    """La chaîne du panel FAO : 8 colonnes, 2 saisies, les retards cherchés."""
+    return ChaineDeService(
+        source="real",
+        registre_source=REGISTERED_MODEL_PANEL,
+        registre_api=REGISTERED_MODEL_PANEL_API,
+        modele_final=PANEL_FINAL_MODEL_PATH,
+        chemin_artefact=API_PANEL_MODEL_PATH,
+        chemin_provenance=API_PANEL_METADATA_PATH,
+        saisies=PANEL_SAISIES,
+        # Rien n'est facultatif ici : sans le pays ni la culture, il n'y a
+        # aucune série dont chercher l'historique.
+        obligatoires=PANEL_SAISIES,
+        facultatives=[],
+        features_modele=PANEL_FEATURES_MODELE,
+        cible=PANEL_TARGET,
+        schema_entree=f"{len(PANEL_SAISIES)}-saisies",
+        variable_uri="AGRITECH_PANEL_MODEL_URI",
+        metrique_ecart="ecart_covariables_imputees",
+        cles_supplementaires=("annee_reference", "annee_predite",
+                              "couples_servables"),
+        charger=charger_panel,
+        construire=construire_panel,
+        verifier=verifier_panel,
+        entree=entree_panel,
+        exemple=exemple_panel,
+        metadonnees=metadonnees_panel,
+    )
+
+
+#: Une fabrique par chaîne, sous le mot que `--source` emploie.
+FABRIQUES = {"simulated": _chaine_parcelle, "real": _chaine_panel}
+
+# Les fabriques et le vocabulaire de `--source` doivent rester solidaires :
+# une chaîne de données sans chaîne de service exportable serait une option de
+# ligne de commande qui échoue à l'exécution.
+assert set(FABRIQUES) == set(SOURCES), \
+    "FABRIQUES et SOURCES décrivent des chaînes différentes"
+
+
+def chaine_de_service(source: str = SOURCE_PAR_DEFAUT) -> ChaineDeService:
+    """Le descripteur de la chaîne demandée, construit maintenant."""
+    return FABRIQUES[source]()
+
+
+def etiquettes_de_version(chaine: ChaineDeService, version_source,
+                          supplements: dict, sceau: str) -> dict:
+    """Ce que portent **à l'identique** la version du registre et le fichier.
+
+    Une seule construction pour les deux, et c'est le correctif d'un défaut
+    réel : les métadonnées propres à une chaîne — l'année prédite, la taille de
+    la table — n'étaient écrites que dans le fichier. La promotion, qui compare
+    les deux déclarations clé par clé, trouvait alors `2016` d'un côté et
+    `None` de l'autre et refusait de poser l'alias. Elle avait raison : une
+    version du registre qui ne porte pas ce qu'annonce l'artefact n'est pas
+    traçable.
+    """
+    return {
+        **versions_des_donnees(chaine.source),
         "phase": "export",
         "artefact": "service",
-        "schema_entree": f"{len(FEATURES_SAISIES)}-saisies",
+        # Le mot de `--source` et le jeu de variables de l'étude dont cet
+        # artefact descend : sans eux, deux versions de service seraient
+        # indiscernables au registre.
+        "source": chaine.source,
+        "jeu_de_variables": JEUX_DE_VARIABLES[chaine.source].artefact,
+        "schema_entree": chaine.schema_entree,
         "modele": version_source.tags.get("modele", "inconnu"),
         # Traçabilité vers l'étape 2 : de quelle version du registre
         # d'entraînement cet artefact descend, et par quel run elle a été
         # produite.
-        "registre_source": REGISTERED_MODEL_NAME,
+        "registre_source": chaine.registre_source,
         "version_source": str(version_source.version),
         "run_source": version_source.run_id,
         # Versions effectives au moment de la sérialisation : un pickle ne se
@@ -357,34 +773,88 @@ def publier(mlflow, artefact, source, version_source, val: pd.DataFrame,
         # que la promotion puisse refuser un `.joblib` remplacé depuis
         # l'export, et pour qu'un conteneur puisse vérifier ce qu'il sert.
         "artefact_sha256": sceau,
+        # Et ce que cette chaîne ajoute, lu dans l'état de l'artefact.
+        **supplements,
     }
 
-    with mlflow.start_run(run_name=f"export-api-{etiquettes['modele']}"):
+
+# --------------------------------------------------------------------------- #
+# 5. Publication
+# --------------------------------------------------------------------------- #
+
+
+def publier(mlflow, chaine: ChaineDeService, artefact, source, version_source,
+            val: pd.DataFrame, ecart: float) -> int:
+    """Écrit le `.joblib`, publie au registre, puis **revérifie les trois
+    chemins de rechargement**.
+
+    Trois chemins, parce qu'ils ne contrôlent pas la même chose :
+
+    - le `.joblib` est ce que l'image Docker embarquera ;
+    - `mlflow.sklearn.load_model` rend l'objet brut, **sans** appliquer la
+      signature : il passerait même si celle-ci était fausse ;
+    - `mlflow.pyfunc.load_model` l'applique. C'est le seul qui valide le
+      contrat d'entrée, et c'est aussi ce que chargerait un serveur MLflow.
+    """
+    # Les rechargements se comparent à l'artefact **en mémoire**, dont la
+    # parité avec le modèle du registre vient d'être établie : ce qui est
+    # éprouvé ici est la sérialisation, pas le modèle.
+    entree = chaine.entree(artefact, val)
+    reference = artefact.predict(entree)
+    exigences = dependances_verrouillees(GROUPE_DEPENDANCES)
+
+    print(f"\n=== Dépendances de désérialisation (groupe « "
+          f"{GROUPE_DEPENDANCES} » du lock) ===")
+    print(f"  {len(exigences)} paquets épinglés : "
+          f"{', '.join(exigences[:4])}...")
+
+    print("\n=== Écriture ===")
+    chaine.chemin_artefact.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(artefact, chaine.chemin_artefact)
+    taille_ko = chaine.chemin_artefact.stat().st_size / 1024
+    sceau = empreinte(chaine.chemin_artefact)
+    print(f"  {chaine.chemin_artefact.name:<28} {taille_ko:>7.1f} Ko  "
+          f"sha256 {sceau[:12]}…")
+
+    supplements = chaine.metadonnees(artefact)
+    # Les clés produites et celles que la promotion contrôlera sont la même
+    # liste, vue de deux endroits : les laisser diverger ferait sortir une
+    # métadonnée du contrôle de concordance sans que rien ne le signale.
+    if set(supplements) != set(chaine.cles_supplementaires):
+        raise RuntimeError(
+            f"Métadonnées produites {sorted(supplements)} ≠ clés déclarées "
+            f"{sorted(chaine.cles_supplementaires)} dans le descripteur.")
+
+    etiquettes = etiquettes_de_version(chaine, version_source, supplements,
+                                       sceau)
+
+    with mlflow.start_run(
+            run_name=f"export-api-{chaine.source}-{etiquettes['modele']}"):
         mlflow.set_tags(etiquettes)
         mlflow.log_params({"version_source": version_source.version,
                            "n_val": len(val),
-                           "n_saisies": len(FEATURES_SAISIES),
-                           "n_colonnes_modele": len(FEATURES_MODELE)})
+                           "n_saisies": len(chaine.saisies),
+                           "n_colonnes_modele": len(chaine.features_modele)})
         mlflow.log_metrics({"parite_ecart_max": 0.0,
-                            "ecart_sans_facultatives": ecart_sans,
+                            chaine.metrique_ecart: ecart,
                             "taille_artefact_ko": taille_ko})
-        journaliser_jeux(mlflow, val=val)
+        journaliser_jeux(mlflow, chaine.source, val=val)
 
         info = mlflow.sklearn.log_model(
             artefact,
-            name="modele_api",
+            name=chaine.chemin_artefact.stem,
             # cloudpickle plutôt que skops : skops refuse `numpy.dtype` comme
             # type non fiable et ne saurait pas sérialiser le transformateur
             # maison greffé devant le modèle.
             serialization_format="cloudpickle",
-            signature=construire_signature(),
-            input_example=exemple_entree(val),
+            signature=construire_signature(chaine),
+            input_example=chaine.exemple(artefact, val),
             pip_requirements=exigences,
         )
         version = mlflow.register_model(f"models:/{info.model_id}",
-                                        REGISTERED_MODEL_API, tags=etiquettes)
+                                        chaine.registre_api, tags=etiquettes)
 
-    print(f"  {REGISTERED_MODEL_API} version {version.version} publiée "
+    print(f"  {chaine.registre_api} version {version.version} publiée "
           f"(sans alias)")
 
     # Provenance écrite à côté de l'artefact. Elle existe parce que l'image
@@ -392,50 +862,51 @@ def publier(mlflow, artefact, source, version_source, val: pd.DataFrame,
     # modèle sans pouvoir dire lequel. `/model/info` le lit quand le modèle
     # vient du `.joblib` plutôt que du registre.
     provenance = {
-        "registre": REGISTERED_MODEL_API,
+        "registre": chaine.registre_api,
         "version": int(version.version),
         # Volontairement nul : l'alias se pose après les tests d'intégration.
         # Un artefact qui s'annoncerait champion avant validation mentirait.
         "alias": None,
-        **{cle: etiquettes[cle] for cle in (
-            "modele", "registre_source", "version_source", "run_source",
-            "schema_entree", "data_version", "split_version",
-            "hypotheses_economiques", "sklearn_version", "pandas_version",
-            "numpy_version", "artefact_sha256")},
-        "saisies_obligatoires": FEATURES_OBLIGATOIRES,
-        "saisies_facultatives": FEATURES_FACULTATIVES,
+        **{cle: etiquettes[cle] for cle in CLES_CONCORDANCE},
+        **supplements,
+        "saisies_obligatoires": chaine.obligatoires,
+        "saisies_facultatives": chaine.facultatives,
         "exporte_le": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    API_METADATA_PATH.write_text(
+    chaine.chemin_provenance.write_text(
         json.dumps(provenance, indent=1, ensure_ascii=False) + "\n",
         encoding="utf-8")
-    print(f"  {API_METADATA_PATH.name:<28} provenance -> "
-          f"{REGISTERED_MODEL_NAME} v{version_source.version} "
+    print(f"  {chaine.chemin_provenance.name:<28} provenance -> "
+          f"{chaine.registre_source} v{version_source.version} "
           f"({etiquettes['modele']})")
 
     print("\n=== Rechargement : les trois chemins ===")
     exiger_parite(".joblib (ce que l'image embarque)",
-                  joblib.load(API_MODEL_PATH).predict(val[FEATURES_SAISIES]),
+                  joblib.load(chaine.chemin_artefact).predict(entree),
                   reference)
 
-    uri = f"models:/{REGISTERED_MODEL_API}/{version.version}"
+    uri = f"models:/{chaine.registre_api}/{version.version}"
     exiger_parite("registre, mlflow.sklearn (objet brut)",
-                  mlflow.sklearn.load_model(uri).predict(val[FEATURES_SAISIES]),
+                  mlflow.sklearn.load_model(uri).predict(entree),
                   reference)
 
     pyfunc = mlflow.pyfunc.load_model(uri)
     exiger_parite("registre, mlflow.pyfunc (signature appliquée)",
-                  np.asarray(pyfunc.predict(val[FEATURES_SAISIES])).ravel(),
+                  np.asarray(pyfunc.predict(entree)).ravel(),
                   reference)
 
     # Le contrat doit aussi **refuser** ce qu'il déclare obligatoire : une
-    # signature qui laisse tout passer ne protège de rien.
+    # signature qui laisse tout passer ne protège de rien. N'importe quelle
+    # saisie obligatoire ferait l'épreuve ; la dernière déclarée, par
+    # convention.
+    exigee = chaine.obligatoires[-1]
     try:
-        pyfunc.predict(val[FEATURES_SAISIES].drop(columns=["Crop"]))
+        pyfunc.predict(entree.drop(columns=[exigee]))
     except Exception:
-        print(f"  {'saisie obligatoire absente : rejetée':<44} OK")
+        print(f"  {'saisie obligatoire absente : rejetée':<44} OK ({exigee})")
     else:
-        raise RuntimeError("La signature n'exige pas `Crop`. Contrat invalide.")
+        raise RuntimeError(
+            f"La signature n'exige pas `{exigee}`. Contrat invalide.")
 
     return int(version.version)
 
@@ -469,7 +940,8 @@ CLES_CONCORDANCE = ("modele", "registre_source", "version_source",
                     "artefact_sha256")
 
 
-def _ecrire_provenance(provenance: dict) -> None:
+def _ecrire_provenance(provenance: dict,
+                       chemin: Path = API_METADATA_PATH) -> None:
     """Écrit le fichier de provenance par remplacement, non par troncature.
 
     `write_text` ouvre en écrasant : une interruption en cours d'écriture
@@ -481,14 +953,14 @@ def _ecrire_provenance(provenance: dict) -> None:
     POSIX** et n'en donne aucune sous Windows. Ce détour supprime donc le cas
     du fichier à moitié écrit ; il ne rend pas l'opération transactionnelle.
     """
-    temporaire = API_METADATA_PATH.with_suffix(".json.tmp")
+    temporaire = chemin.with_suffix(".json.tmp")
     temporaire.write_text(
         json.dumps(provenance, indent=1, ensure_ascii=False) + "\n",
         encoding="utf-8")
-    os.replace(temporaire, API_METADATA_PATH)
+    os.replace(temporaire, chemin)
 
 
-def promouvoir(mlflow) -> None:
+def promouvoir(mlflow, chaine: ChaineDeService | None = None) -> None:
     """Pose l'alias champion et met la provenance à jour.
 
     **Ce n'est pas une transaction.** Le registre MLflow et le fichier du
@@ -514,19 +986,25 @@ def promouvoir(mlflow) -> None:
     """
     from mlflow.tracking import MlflowClient
 
-    if not API_METADATA_PATH.exists():
-        raise FileNotFoundError(
-            f"Provenance absente : {API_METADATA_PATH}. Exécuter l'export "
-            "avant toute promotion.")
+    chaine = chaine or chaine_de_service()
+    # Les clés communes, plus celles que cette chaîne ajoute : sur le panel,
+    # l'année prédite et la taille de la table embarquée en font partie.
+    cles = (*CLES_CONCORDANCE, *chaine.cles_supplementaires)
 
-    provenance = json.loads(API_METADATA_PATH.read_text(encoding="utf-8"))
+    if not chaine.chemin_provenance.exists():
+        raise FileNotFoundError(
+            f"Provenance absente : {chaine.chemin_provenance}. Exécuter "
+            f"l'export de la chaîne {chaine.source!r} avant toute promotion.")
+
+    provenance = json.loads(
+        chaine.chemin_provenance.read_text(encoding="utf-8"))
 
     # Une provenance écrite par une version antérieure du script n'a pas
     # toutes les clés contrôlées. Le dire vaut mieux qu'un KeyError nu.
-    manquantes = [cle for cle in CLES_CONCORDANCE if cle not in provenance]
+    manquantes = [cle for cle in cles if cle not in provenance]
     if manquantes:
         raise RuntimeError(
-            f"{API_METADATA_PATH.name} est antérieur à ces clés de "
+            f"{chaine.chemin_provenance.name} est antérieur à ces clés de "
             f"traçabilité : {', '.join(manquantes)}.\n"
             "  Réexécuter l'export pour produire une provenance complète.")
 
@@ -535,7 +1013,7 @@ def promouvoir(mlflow) -> None:
     enregistree = client.get_model_version(registre, str(version))
 
     ecarts = {cle: (provenance[cle], enregistree.tags.get(cle))
-              for cle in CLES_CONCORDANCE
+              for cle in cles
               if str(provenance[cle]) != str(enregistree.tags.get(cle))}
     if ecarts:
         raise RuntimeError(
@@ -543,24 +1021,25 @@ def promouvoir(mlflow) -> None:
             f"  écarts (disque, registre) : {ecarts}\n"
             "  Réexécuter l'export avant de promouvoir.")
     print(f"\n=== Concordance ===")
-    print(f"  {len(CLES_CONCORDANCE)} clés identiques entre "
-          f"{API_METADATA_PATH.name} et {registre} v{version}")
+    print(f"  {len(cles)} clés identiques entre "
+          f"{chaine.chemin_provenance.name} et {registre} v{version}")
 
     # L'empreinte est recalculée sur le fichier **présent**. Comparer la
     # provenance au registre ne dirait rien d'un `.joblib` remplacé depuis
     # l'export : les deux porteraient la même valeur périmée.
-    if not API_MODEL_PATH.exists():
+    if not chaine.chemin_artefact.exists():
         raise FileNotFoundError(
-            f"Artefact absent : {API_MODEL_PATH}. Promouvoir une version dont "
-            "le binaire manque laisserait l'image sans modèle à servir.")
-    constatee = empreinte(API_MODEL_PATH)
+            f"Artefact absent : {chaine.chemin_artefact}. Promouvoir une "
+            "version dont le binaire manque laisserait l'image sans modèle "
+            "à servir.")
+    constatee = empreinte(chaine.chemin_artefact)
     if constatee != provenance["artefact_sha256"]:
         raise RuntimeError(
-            f"{API_MODEL_PATH.name} n'est pas le fichier qui a été exporté.\n"
+            f"{chaine.chemin_artefact.name} n'est pas le fichier exporté.\n"
             f"  enregistrée : {provenance['artefact_sha256']}\n"
             f"  constatée   : {constatee}\n"
             "  Réexécuter l'export avant de promouvoir.")
-    print(f"  {API_MODEL_PATH.name} scellé        sha256 {constatee[:12]}…")
+    print(f"  {chaine.chemin_artefact.name} scellé  sha256 {constatee[:12]}…")
 
     print(f"\n=== Promotion ===")
     try:
@@ -583,14 +1062,14 @@ def promouvoir(mlflow) -> None:
         timespec="seconds")
 
     try:
-        _ecrire_provenance(provenance)
+        _ecrire_provenance(provenance, chaine.chemin_provenance)
     except OSError as erreur:
         # L'alias est posé, le fichier ne l'est pas : c'est précisément la
         # divergence que cette fonction ne peut pas empêcher. On la nomme.
         raise RuntimeError(
             f"DIVERGENCE — « {ALIAS_CHAMPION} » désigne {registre} v{version} "
-            f"au registre, mais {API_METADATA_PATH.name} n'a pas pu être "
-            f"écrit ({erreur}).\n"
+            f"au registre, mais {chaine.chemin_provenance.name} n'a pas "
+            f"pu être écrit ({erreur}).\n"
             "  L'artefact du disque annonce donc un statut faux.\n"
             "  Reprise : corriger la cause, puis relancer la même commande. "
             "Elle est idempotente et résorbe l'écart sans créer de version.\n"
@@ -599,7 +1078,8 @@ def promouvoir(mlflow) -> None:
         ) from erreur
 
     # Les deux écritures ont rendu la main : on relit plutôt que de supposer.
-    relue = json.loads(API_METADATA_PATH.read_text(encoding="utf-8"))
+    relue = json.loads(
+        chaine.chemin_provenance.read_text(encoding="utf-8"))
     pose = int(client.get_model_version_by_alias(registre,
                                                  ALIAS_CHAMPION).version)
     if relue["alias"] != ALIAS_CHAMPION or pose != version:
@@ -608,10 +1088,10 @@ def promouvoir(mlflow) -> None:
             f"porte alias={relue['alias']!r}. Relancer la commande.")
 
     print(f"  {registre} v{version}  <-  « {ALIAS_CHAMPION} »")
-    print(f"  {API_METADATA_PATH.name:<28} alias = {ALIAS_CHAMPION!r}")
+    print(f"  {chaine.chemin_provenance.name:<28} alias = {ALIAS_CHAMPION!r}")
     print(f"  {'relecture des deux côtés':<28} concordent")
-    print("\n  L'API peut désormais servir depuis le registre :")
-    print(f"    $env:AGRITECH_MODEL_URI = "
+    print("\n  L'API peut désormais servir cette chaîne depuis le registre :")
+    print(f"    $env:{chaine.variable_uri} = "
           f"\"models:/{registre}@{ALIAS_CHAMPION}\"")
     print("    uv run uvicorn api.main:app")
 
@@ -624,12 +1104,23 @@ def promouvoir(mlflow) -> None:
 def analyser_arguments():
     """Les options de la ligne de commande.
 
-    `--sample` implique `--verifier-seulement` : la table FAO doit être
-    ajustée sur l'intégralité de `train`, un artefact construit sur un
-    échantillon ne doit donc jamais être publié.
+    `--sample` implique `--verifier-seulement` : les tables embarquées — la
+    correspondance FAO d'un côté, les derniers retards de l'autre — doivent
+    être ajustées sur l'intégralité de leurs données. Un artefact construit sur
+    un échantillon ne doit donc jamais être publié.
+
+    **Une seule chaîne par exécution**, là où `train.py` accepte les deux : un
+    export écrit un artefact nommé et publie une version dans un registre
+    précis, deux gestes qui ne se cumulent pas.
     """
     parseur = argparse.ArgumentParser(
         description="Assemble et publie l'artefact de service de l'API.")
+    parseur.add_argument(
+        "--source", choices=list(SOURCES), default=SOURCE_PAR_DEFAUT,
+        help=f"chaîne à exporter (défaut : {SOURCE_PAR_DEFAUT}, les 8 saisies "
+             "de parcelle). `real` exporte le service national du panel FAO : "
+             "le pays et la culture, les retards cherchés dans la table "
+             "embarquée. Le même mot qu'attendent les autres scripts")
     parseur.add_argument(
         "--verifier-seulement", action="store_true",
         help="exécute toutes les vérifications sans rien écrire")
@@ -639,8 +1130,9 @@ def analyser_arguments():
              "et met ce fichier à jour — sans rien réexporter")
     parseur.add_argument(
         "--sample", type=int, default=None,
-        help="sous-échantillonne train — implique --verifier-seulement, la "
-             "table FAO devant être ajustée sur l'intégralité de train")
+        help="sous-échantillonne le témoin de parité — implique "
+             "--verifier-seulement, les tables embarquées devant être "
+             "ajustées sur l'intégralité de leurs données")
     return parseur.parse_args()
 
 
@@ -652,6 +1144,7 @@ def main():
     promotion reste un geste explicite, postérieur aux tests de l'API.
     """
     arguments = analyser_arguments()
+    chaine = chaine_de_service(arguments.source)
 
     # La promotion est un geste à part : elle ne réexporte rien, elle désigne.
     # La combiner à un export ferait promouvoir une version dans le même souffle
@@ -660,34 +1153,36 @@ def main():
         if arguments.verifier_seulement or arguments.sample:
             raise SystemExit("--promouvoir ne se combine ni avec "
                              "--verifier-seulement ni avec --sample.")
-        promouvoir(configurer_mlflow(SOURCE_PAR_DEFAUT))
+        promouvoir(configurer_mlflow(chaine.source), chaine)
         return
 
     verifier_seulement = arguments.verifier_seulement or bool(arguments.sample)
     if arguments.sample and not arguments.verifier_seulement:
         print("--sample implique --verifier-seulement : rien ne sera publié.\n")
 
-    mlflow = configurer_mlflow(SOURCE_PAR_DEFAUT)
-    source, version_source = resoudre_source(mlflow)
+    mlflow = configurer_mlflow(chaine.source)
+    source, version_source = resoudre_source(mlflow, chaine)
 
-    train, val = charger_partitions(echantillon=arguments.sample)
-    print(f"\n=== Assemblage ===")
-    artefact = construire_artefact(source, train)
+    ajustement, val = chaine.charger(arguments.sample)
+    print(f"\n=== Assemblage ({chaine.source}) ===")
+    artefact = chaine.construire(source, ajustement)
 
-    ecart_sans = verifier_avant_ecriture(artefact, source, val)
+    ecart = chaine.verifier(chaine, artefact, source, ajustement, val)
 
     if verifier_seulement:
         print("\nToutes les vérifications passent. Rien n'a été écrit "
               "(--verifier-seulement).")
         return
 
-    version = publier(mlflow, artefact, source, version_source, val, ecart_sans)
+    version = publier(mlflow, chaine, artefact, source, version_source, val,
+                      ecart)
 
     print("\n=== Publié, pas promu ===")
-    print(f"  {REGISTERED_MODEL_API} version {version} n'a aucun alias.")
+    print(f"  {chaine.registre_api} version {version} n'a aucun alias.")
     print(f"  L'alias « {ALIAS_CHAMPION} » se pose après les tests "
           f"d'intégration de l'API :")
-    print("    uv run python scripts/export_api_model.py --promouvoir")
+    print(f"    uv run python scripts/export_api_model.py "
+          f"--source {chaine.source} --promouvoir")
     # Une commande de ce script, et non `mlflow` en direct : poser l'alias à la
     # main laisserait `alias` à `null` dans le fichier de provenance, et
     # l'artefact embarqué mentirait sur son propre statut. Les deux doivent

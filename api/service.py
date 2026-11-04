@@ -26,6 +26,8 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 from itertools import combinations
+from pathlib import Path
+from typing import NamedTuple
 
 import joblib
 import pandas as pd
@@ -33,21 +35,35 @@ import pandas as pd
 from agritech.config import (
     API_METADATA_PATH,
     API_MODEL_PATH,
+    API_PANEL_METADATA_PATH,
+    API_PANEL_MODEL_PATH,
+    CULTURES_PANEL_EN_FRANCAIS,
     DEMI_INTERVALLE_PREDICTION_95_T_HA,
     DOMAINE_ENTRAINEMENT,
     HYPOTHESES_ECONOMIQUES_VERSION,
     MLFLOW_TRACKING_URI,
     MODALITES_CATEGORIELLES,
+    PANEL_COUVERTURE_MESUREE,
+    PANEL_INTERVALLE_PLANCHER_95_T_HA,
+    PANEL_INTERVALLE_RELATIF_95,
+    PANEL_PREDICTION_MINIMALE_T_HA,
     PRIX_REFERENCE_FAOSTAT,
     PRIX_REFERENCE_SOURCE,
     SEUIL_ECART_RENDEMENT_PERTINENT_T_HA,
 )
+from agritech.preprocessing import PANEL_SAISIES
 from api.schemas import (
     BudgetProduction,
     ClassementEconomique,
+    ClassementNationalRequete,
+    ClassementNationalReponse,
+    CultureDisponible,
     DiagnosticAgronomique,
+    IntervalleEmpirique,
     IntervallePrediction,
     MargeCulture,
+    PredictionNationaleReponse,
+    PredictionNationaleRequete,
     PredictionReponse,
     PredictionRequete,
     PrixCultureReference,
@@ -57,13 +73,24 @@ from api.schemas import (
     RecommandationRequete,
     RecommandationReponse,
     RendementCulture,
+    RendementNational,
+    RendementObserve,
     SensibilitePrix,
+    SerieNationale,
+    SeriesNationalesReponse,
     ServedModel,
     SourcePrixReference,
 )
 
 #: Variable d'environnement qui bascule du joblib embarqué vers le registre.
 VARIABLE_URI = "AGRITECH_MODEL_URI"
+
+#: La même bascule, pour la chaîne nationale. Deux variables et non une :
+#: les deux artefacts ont des registres distincts et des contrats d'entrée
+#: différents, et on doit pouvoir servir l'un depuis le registre sans toucher
+#: à l'autre. `scripts/export_api_model.py` affiche ces noms après chaque
+#: promotion, et un test confronte les deux listes.
+VARIABLE_URI_PANEL = "AGRITECH_PANEL_MODEL_URI"
 
 #: Amplitude du scénario de prix. Hypothèse de simulation, pas une fourchette
 #: de marché : rien dans les données ne documente la volatilité des prix.
@@ -101,14 +128,50 @@ class ModeleServi:
     provenance: dict
 
 
-def _lire_provenance() -> dict:
+class ArtefactServi(NamedTuple):
+    """Où trouver un artefact de service, et par quoi le détourner.
+
+    Les deux chaînes partagent toute la mécanique de chargement — provenance,
+    sceau, bascule vers le registre — et ne diffèrent que par ces quatre
+    valeurs. Les déclarer ici évite deux fonctions de chargement jumelles,
+    dont l'une finirait par ne plus recevoir les corrections de l'autre.
+    """
+
+    chemin: Path
+    provenance: Path
+    variable_uri: str
+    #: Ce que le `--source` de l'export appelle cette chaîne, pour que les
+    #: messages d'erreur nomment la commande à relancer.
+    source: str
+
+
+def artefact_parcelle() -> ArtefactServi:
+    """L'artefact des parcelles simulées, chemins lus **maintenant**.
+
+    Construit à l'appel et non figé dans une constante : les tests détournent
+    `API_MODEL_PATH` vers un dossier temporaire pour éprouver le sceau, et une
+    liaison faite à l'import continuerait de pointer vers `models/`.
+    """
+    return ArtefactServi(API_MODEL_PATH, API_METADATA_PATH, VARIABLE_URI,
+                         "simulated")
+
+
+def artefact_panel() -> ArtefactServi:
+    """L'artefact du service national, pour la même raison."""
+    return ArtefactServi(API_PANEL_MODEL_PATH, API_PANEL_METADATA_PATH,
+                         VARIABLE_URI_PANEL, "real")
+
+
+def _lire_provenance(artefact: ArtefactServi | None = None) -> dict:
     """Le fichier d'accompagnement de l'artefact. Son absence est bloquante."""
-    if not API_METADATA_PATH.exists():
+    artefact = artefact or artefact_parcelle()
+    if not artefact.provenance.exists():
         raise FileNotFoundError(
-            f"Provenance absente : {API_METADATA_PATH}. Exécuter "
-            "`uv run python scripts/export_api_model.py` avant de servir."
+            f"Provenance absente : {artefact.provenance}. Exécuter "
+            f"`uv run python scripts/export_api_model.py "
+            f"--source {artefact.source}` avant de servir."
         )
-    return json.loads(API_METADATA_PATH.read_text(encoding="utf-8"))
+    return json.loads(artefact.provenance.read_text(encoding="utf-8"))
 
 
 def _resoudre_registre(uri: str) -> tuple[str, int]:
@@ -140,7 +203,8 @@ def _exiger_coherence(provenance: dict, registre: str, version: int) -> None:
         )
 
 
-def _exiger_sceau(provenance: dict) -> None:
+def _exiger_sceau(provenance: dict,
+                  artefact: ArtefactServi | None = None) -> None:
     """L'artefact présent doit être celui que la provenance décrit.
 
     C'est le contrôle qui compte dans un conteneur. Une image fige un
@@ -157,25 +221,27 @@ def _exiger_sceau(provenance: dict) -> None:
     L'échec est délibérément fatal : servir en sachant que l'artefact et sa
     provenance divergent serait pire que de ne pas démarrer.
     """
-    if not API_MODEL_PATH.exists():
+    artefact = artefact or artefact_parcelle()
+
+    if not artefact.chemin.exists():
         raise FileNotFoundError(
-            f"Artefact absent : {API_MODEL_PATH}. L'image doit embarquer "
-            f"{API_MODEL_PATH.name} à côté de sa provenance."
+            f"Artefact absent : {artefact.chemin}. L'image doit embarquer "
+            f"{artefact.chemin.name} à côté de sa provenance."
         )
 
     attendue = provenance.get("artefact_sha256")
     if attendue is None:
         raise RuntimeError(
-            f"{API_METADATA_PATH.name} ne porte pas d'empreinte : il précède "
-            "le contrat de traçabilité courant. Réexécuter "
+            f"{artefact.provenance.name} ne porte pas d'empreinte : il "
+            "précède le contrat de traçabilité courant. Réexécuter "
             "`scripts/export_api_model.py` avant de construire l'image."
         )
 
-    constatee = hashlib.sha256(API_MODEL_PATH.read_bytes()).hexdigest()
+    constatee = hashlib.sha256(artefact.chemin.read_bytes()).hexdigest()
     if constatee != attendue:
         raise RuntimeError(
-            f"{API_MODEL_PATH.name} n'est pas l'artefact décrit par "
-            f"{API_METADATA_PATH.name}.\n"
+            f"{artefact.chemin.name} n'est pas l'artefact décrit par "
+            f"{artefact.provenance.name}.\n"
             f"  attendue  : {attendue}\n"
             f"  constatée : {constatee}\n"
             "  L'image embarque un modèle et une provenance qui ne vont pas "
@@ -183,23 +249,30 @@ def _exiger_sceau(provenance: dict) -> None:
         )
 
 
-def charger_modele(uri: str | None = None) -> ModeleServi:
-    """Charge depuis le registre MLflow, ou depuis l'artefact embarqué."""
-    provenance = _lire_provenance()
-    uri = uri if uri is not None else os.environ.get(VARIABLE_URI)
+def charger_modele(uri: str | None = None,
+                   artefact: ArtefactServi | None = None) -> ModeleServi:
+    """Charge depuis le registre MLflow, ou depuis l'artefact embarqué.
+
+    `artefact` désigne la chaîne à charger ; sans lui, celle des parcelles,
+    pour que les appels écrits avant l'arrivée du service national continuent
+    de décrire ce qu'ils décrivaient.
+    """
+    artefact = artefact or artefact_parcelle()
+    provenance = _lire_provenance(artefact)
+    uri = uri if uri is not None else os.environ.get(artefact.variable_uri)
 
     if not uri:
         # Le sceau est vérifié **avant** le chargement : désérialiser un
         # pickle dont on sait déjà qu'il ne correspond pas à sa provenance
         # n'apporterait rien et exécuterait son contenu.
-        _exiger_sceau(provenance)
-        pipeline = joblib.load(API_MODEL_PATH)
+        _exiger_sceau(provenance, artefact)
+        pipeline = joblib.load(artefact.chemin)
         registre, version = provenance["registre"], int(provenance["version"])
         source = "bundled-joblib"
     else:
         if not uri.startswith("models:/"):
             raise ValueError(
-                f"{VARIABLE_URI} attend `models:/nom@alias` ou "
+                f"{artefact.variable_uri} attend `models:/nom@alias` ou "
                 f"`models:/nom/version` — reçu {uri!r}."
             )
         # Importé ici seulement : MLflow est absent de l'image de l'API.
@@ -217,6 +290,16 @@ def charger_modele(uri: str | None = None) -> ModeleServi:
         served=ServedModel(registry=registre, version=version, source=source),
         provenance=provenance,
     )
+
+
+def charger_modele_national(uri: str | None = None) -> ModeleServi:
+    """Le même chargement, pour l'artefact du panel FAO.
+
+    Une fonction nommée plutôt qu'un argument à la charge de l'appelant :
+    `main.py` doit pouvoir charger les deux modèles sans rien savoir des
+    chemins, et un test doit pouvoir détourner celui-ci seul.
+    """
+    return charger_modele(uri, artefact_panel())
 
 
 @lru_cache(maxsize=1)
@@ -630,4 +713,241 @@ def construire_recommandation(
                               _avertissements_domaine(contexte), limitations,
                               economique is not None),
         served_model=modele.served,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Service national — la seconde chaîne
+#
+# Ce que ces trois fonctions servent n'est pas une variante de ce qui précède.
+# L'unité d'observation change : un pays, une culture, une année, et non une
+# parcelle dans des conditions données. D'où des blocs de réponse distincts,
+# un intervalle calibré autrement, et aucune ligne de calcul en commun hormis
+# la provenance du modèle.
+# --------------------------------------------------------------------------- #
+
+#: Les quatre réserves que **toute** réponse de cette chaîne porte, en une
+#: ligne chacune. Elles sont courtes par construction : une réponse de
+#: `/national/ranking` les aurait sinon fait voyager à côté de dix cultures.
+#: Le détail — méthode de calibration, hétérogénéité de l'erreur, variables
+#: écartées — vit dans les schémas et le rapport, où on le lit une fois.
+LIMITATIONS_NATIONALES = (
+    "Rendement **national** annuel, non parcellaire : la moyenne d'un pays sur "
+    "une année. Ne remplace pas `/predict`.",
+    "Aucune condition de culture n'entre dans le calcul : la prédiction "
+    "reconduit les trois derniers rendements connus de la série.",
+    f"Intervalle empirique : couverture globale de "
+    f"{PANEL_COUVERTURE_MESUREE['globale']:.1%} mesurée sur `test`, non une "
+    f"garantie par prédiction.",
+)
+
+NOTE_ECONOMIQUE = (
+    "Aucune marge : il manque six prix sur dix pour ces cultures, et sur les "
+    "quatre tarifées l'ordre change entre les tonnes et la valeur."
+)
+
+RESERVE_SERIES = (
+    "Seules les séries dont le dernier relevé est l'année de référence sont "
+    "servies : un historique interrompu plus tôt ne permet pas de prévoir "
+    "l'année suivante."
+)
+
+
+def _derivation(modele: ModeleServi):
+    """Le transformateur du pipeline servi, sous l'enveloppe du gel.
+
+    `FrozenEstimator` expose le Pipeline sous `estimator` ; un Pipeline nu
+    n'a pas cet attribut, et un double de test non gelé non plus. Le `getattr`
+    accepte les deux au lieu d'imposer une structure que seul l'export
+    produit.
+    """
+    pipeline = modele.pipeline
+    return getattr(pipeline, "estimator", pipeline).named_steps["derivation"]
+
+
+def _intervalle_empirique(valeur: float) -> IntervalleEmpirique:
+    """Le relatif, élargi par le plancher absolu. L'union des deux.
+
+    Le maximum des deux largeurs, et non leur somme : chacune couvre 95 % à
+    elle seule sur son domaine, les additionner produirait un intervalle deux
+    fois trop large là où les deux mordent.
+    """
+    base = max(valeur, PANEL_PREDICTION_MINIMALE_T_HA)
+    bas_relatif, haut_relatif = PANEL_INTERVALLE_RELATIF_95
+    bas_plancher, haut_plancher = PANEL_INTERVALLE_PLANCHER_95_T_HA
+
+    bas = valeur + min(bas_relatif * base, bas_plancher)
+    haut = valeur + max(haut_relatif * base, haut_plancher)
+    return IntervalleEmpirique(
+        lower_t_ha=round(max(bas, 0.0), 3),
+        upper_t_ha=round(haut, 3),
+        measured_coverage=PANEL_COUVERTURE_MESUREE["globale"],
+    )
+
+
+def _qualite_nationale(modele: ModeleServi,
+                       limitations: tuple[str, ...] = ()) -> QualiteDonnees:
+    """Le bloc de réserves de cette chaîne.
+
+    `training_data` vaut `real` : ces rendements sont observés, non simulés.
+    C'est la seule bonne nouvelle du bloc, et elle ne dispense d'aucune des
+    autres lignes — des données réelles à la mauvaise échelle ne répondent pas
+    mieux à la question d'un agriculteur.
+    """
+    annee = modele.provenance.get("annee_predite")
+    datation = (
+        f"Prévision pour {annee}, l'année qui suit le dernier relevé du "
+        "panel — pas la campagne en cours."
+    ) if annee else None
+
+    return QualiteDonnees(
+        training_data="real",
+        data_version=modele.provenance["data_version"],
+        split_version=modele.provenance["split_version"],
+        economic_assumptions_version=None,
+        warnings=[],
+        limitations=[ligne for ligne in (datation, *LIMITATIONS_NATIONALES,
+                                         *limitations) if ligne],
+    )
+
+
+def _historique(derivation, area: str, item: str) -> list[RendementObserve]:
+    """Les trois rendements servis, du plus récent au plus ancien.
+
+    Les années se déduisent de l'année de référence : `lag1` est celle-là,
+    puis l'on remonte d'un an par retard. C'est le décalage que le
+    transformateur applique, lu dans l'autre sens.
+    """
+    retards = derivation.retards(area, item)
+    return [RendementObserve(year=derivation.annee_reference_ - rang,
+                             yield_t_ha=round(valeur, 4))
+            for rang, valeur in enumerate(retards.values())]
+
+
+def construire_prediction_nationale(
+        modele: ModeleServi,
+        requete: PredictionNationaleRequete) -> PredictionNationaleReponse:
+    """`/national/predict` : un rendement national, et d'où il vient."""
+    derivation = _derivation(modele)
+    # La prédiction d'abord : c'est le transformateur qui refuse un couple
+    # absent de sa table, avec le message qui dit pourquoi.
+    (rendement,) = _predire(modele, [{"Area": requete.area,
+                                      "Item": requete.item}])
+
+    return PredictionNationaleReponse(
+        area=requete.area,
+        item=requete.item,
+        reference_year=derivation.annee_reference_,
+        target_year=derivation.annee_predite_,
+        yield_t_ha=round(rendement, 3),
+        prediction_interval_95=_intervalle_empirique(rendement),
+        history=_historique(derivation, requete.area, requete.item),
+        data_quality=_qualite_nationale(modele),
+        served_model=modele.served,
+    )
+
+
+def _note_classement_national(cultures: list[str], etendue: float,
+                              annee: int) -> str:
+    """La portée du classement, dite avec ce qui le produit.
+
+    Un pays peut n'avoir qu'une culture : annoncer un classement dans ce cas
+    serait un abus de mot, et la note le dit plutôt que de rendre une liste
+    d'un élément sans commentaire.
+    """
+    if len(cultures) == 1:
+        return (f"{cultures[0]} est la seule culture à historique exploitable "
+                f"ici : pas de classement, une prévision pour {annee}.")
+
+    return (
+        f"Classement par rendement national estimé pour {annee}, non par "
+        f"rentabilité. Écart première-dernière : {etendue:.2f} t/ha, dû "
+        "surtout au niveau de la culture. Ne dépend d'aucune condition saisie."
+    )
+
+
+def construire_classement_national(
+        modele: ModeleServi,
+        requete: ClassementNationalRequete) -> ClassementNationalReponse:
+    """`/national/ranking` : les cultures du pays, par rendement estimé.
+
+    Seules les cultures que ce pays a effectivement cultivées sont comparées.
+    Sans ce garde-fou, le modèle interrogé sur la France placerait le plantain
+    en deuxième position : il lui attribuerait l'historique mondial faute du
+    sien.
+    """
+    derivation = _derivation(modele)
+    cultures = derivation.cultures_par_pays().get(requete.area)
+    if not cultures:
+        raise ValueError(
+            f"Pays non servable : {requete.area!r}. La table embarquée en "
+            f"porte {len(derivation.cultures_par_pays())}, sous leur nom FAO ; "
+            "`GET /national/series` en donne la liste."
+        )
+
+    rendements = _predire(modele, [{"Area": requete.area, "Item": item}
+                                   for item in cultures])
+    # Tri sur la valeur exacte, l'arrondi n'intervenant qu'à l'affichage :
+    # trier sur l'arrondi créerait des ex æquo que l'ordre de déclaration
+    # départagerait, et l'ordre annoncé ne serait plus celui du modèle.
+    ordonnes = sorted(zip(cultures, rendements), key=lambda paire: paire[1],
+                      reverse=True)
+
+    classement = [
+        RendementNational(
+            item=item,
+            item_fr=CULTURES_PANEL_EN_FRANCAIS.get(item, item),
+            yield_t_ha=round(valeur, 3),
+            prediction_interval_95=_intervalle_empirique(valeur),
+            last_observed_t_ha=round(
+                derivation.retards(requete.area, item)["lag1"], 4),
+        )
+        for item, valeur in ordonnes
+    ]
+    etendue = ordonnes[0][1] - ordonnes[-1][1]
+
+    return ClassementNationalReponse(
+        area=requete.area,
+        reference_year=derivation.annee_reference_,
+        target_year=derivation.annee_predite_,
+        ranking=classement,
+        ranking_note=_note_classement_national(
+            [item for item, _ in ordonnes], etendue,
+            derivation.annee_predite_),
+        economic_note=NOTE_ECONOMIQUE,
+        data_quality=_qualite_nationale(modele),
+        served_model=modele.served,
+    )
+
+
+def series_nationales(modele: ModeleServi) -> SeriesNationalesReponse:
+    """`/national/series` : ce que le service sait prédire, et pour quand.
+
+    La table embarquée fait foi. Une interface qui recopierait cette liste
+    proposerait tôt ou tard un couple que l'artefact ne connaît pas — c'est
+    la même raison qui fait de `/model/info` la référence des modalités de la
+    chaîne des parcelles.
+    """
+    derivation = _derivation(modele)
+    par_pays = derivation.cultures_par_pays()
+
+    series = [
+        SerieNationale(
+            area=aire,
+            items=[CultureDisponible(
+                item=item,
+                item_fr=CULTURES_PANEL_EN_FRANCAIS.get(item, item))
+                for item in cultures],
+        )
+        for aire, cultures in par_pays.items()
+    ]
+
+    return SeriesNationalesReponse(
+        reference_year=derivation.annee_reference_,
+        target_year=derivation.annee_predite_,
+        areas=series,
+        areas_count=len(series),
+        series_count=sum(len(serie.items) for serie in series),
+        served_model=modele.served,
+        caveat=RESERVE_SERIES,
     )
