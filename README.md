@@ -8,6 +8,10 @@ La seconde réponse est une **marge brute simulée** — rendement estimé × pr
 
 Le modèle est servi par une API FastAPI, interrogée par une interface Streamlit. Le tout est reproductible de bout en bout : un clone neuf rejoue la préparation des données, l'entraînement et l'export par une suite de commandes, et une chaîne d'intégration continue éprouve l'ensemble à chaque poussée.
 
+**En ligne** — interface <https://agritech-answers.streamlit.app> · API <https://agritech-api-mjjk.onrender.com> ([documentation interactive](https://agritech-api-mjjk.onrender.com/docs))
+
+Les deux sont hébergés sur des offres gratuites : après quinze minutes sans visite, l'API s'endort et la première requête attend près d'une minute pendant qu'elle se réveille. L'interface l'annonce et réessaie d'elle-même.
+
 **Dépôt** — <https://github.com/FaizaKh93/Projet12_mission>
 
 ## Sommaire
@@ -132,6 +136,31 @@ Il répond alors sur `http://localhost:8000`. Deux adresses valent le détour :
 
 L'option `--reload` recharge le service à chaque modification du code, pratique en développement.
 
+#### Lire `/logs` — ce qui change entre le poste et le conteneur
+
+Cette route rend les **corps complets** des appels, budgets de `/recommend` compris. Elle est donc la seule du service à être verrouillée, et son comportement diffère selon d'où elle est servie. Deux surprises possibles au premier essai :
+
+```bash
+# Depuis un clone, en local : la route répond, rien à configurer.
+uv run uvicorn api.main:app --port 8000
+curl http://localhost:8000/logs
+
+# Depuis l'image : 503, et c'est voulu — aucune clé n'a été fournie.
+docker run -d --name agritech-api -p 8000:8000 agritech-api
+curl http://localhost:8000/logs        # {"detail": "Aucune clé n'est configurée…"}
+
+# Avec une clé, la route s'ouvre à qui la présente.
+docker run -d --name agritech-api -p 8000:8000 \
+  -e AGRITECH_LOGS_KEY=ce-que-vous-voulez agritech-api
+curl -H "X-API-Key: ce-que-vous-voulez" http://localhost:8000/logs
+```
+
+`X-API-Key` est le **nom de l'en-tête**, pas une valeur : il est écrit en clair dans `api/main.py` et n'a rien d'un secret. La valeur attendue, elle, est celle de `AGRITECH_LOGS_KEY` côté serveur, et ne vit que là où le service tourne — jamais dans ce dépôt.
+
+Depuis `/docs`, la route porte un cadenas : le bouton **Authorize** en haut de page ouvre un champ où saisir la clé une fois pour toutes les requêtes de la session.
+
+Le tableau des trois états figure dans [Variables d'environnement et secrets](#variables-denvironnement-et-secrets), avec la raison du défaut fermé.
+
 ### Lancer l'interface — Streamlit
 
 L'interface est ce que voit l'agriculteur. Elle n'importe ni FastAPI, ni scikit-learn, ni le modèle : elle interroge le service **en HTTP** et met en forme ses réponses. Trois modes :
@@ -166,7 +195,9 @@ docker pull faiza7/agritech-api:latest
 docker run -d --name agritech-api -p 8000:8000 faiza7/agritech-api:latest
 ```
 
-L'image pèse environ 146 Mo et embarque son modèle : ni données, ni MLflow, ni uv. Deux étiquettes sont publiées — `latest`, qui suit `main`, et le SHA du commit, qui rattache chaque image à son code.
+L'image pèse environ 146 Mo et embarque ses deux modèles : ni données, ni MLflow, ni uv. Deux étiquettes sont publiées — `latest`, qui suit `main`, et le SHA du commit, qui rattache chaque image à son code.
+
+Toutes les routes répondent, à une exception près : `GET /logs` rend 503 tant qu'aucune clé n'est fournie au conteneur. Ajoutez `-e AGRITECH_LOGS_KEY=…` pour l'ouvrir — [le détail est plus haut](#lire-logs--ce-qui-change-entre-le-poste-et-le-conteneur).
 
 ### Déployer publiquement — Render et Streamlit Community Cloud
 
@@ -178,10 +209,23 @@ Les deux composants se déploient **séparément**, et c'est exactement ce que p
 |---|---|
 | Source | **Existing Image** → `docker.io/faiza7/agritech-api:latest` |
 | Instance Type | Free |
-| Variable d'environnement | `PORT` = `8000` |
+| Variables d'environnement | `PORT` = `8000` et `AGRITECH_LOGS_KEY` = une chaîne aléatoire |
 | Health Check Path | `/health` |
 
-`PORT` n'est pas facultatif : Render route vers le port `10000` par défaut, là où le `CMD` de l'image écoute sur 8000. Sans cette variable, le déploiement échoue faute de port ouvert. Et un service bâti sur une image **ne se redéploie pas tout seul** quand l'étiquette bouge : après une nouvelle publication, il faut *Manual Deploy → Deploy latest reference*, ou appeler le *deploy hook* du service. La chaîne de livraison s'arrête donc à Docker Hub, délibérément : ce qui est publié n'est pas automatiquement servi.
+`PORT` n'est pas facultatif : Render route vers le port `10000` par défaut, là où le `CMD` de l'image écoute sur 8000. Sans cette variable, le déploiement échoue faute de port ouvert.
+
+`AGRITECH_LOGS_KEY` ne l'est pas davantage : `GET /logs` rend les prix et les charges saisis par les visiteurs précédents. Avec la clé, la route exige l'en-tête `X-API-Key` et répond 401 sinon — elle reste donc démontrable, mais à qui la détient.
+
+**Et sans clé, un conteneur ferme la route au lieu de l'ouvrir.** Le `Dockerfile` pose `AGRITECH_LOGS_REQUIRED=1`, de sorte qu'une image déployée sans `AGRITECH_LOGS_KEY` répond 503 sur cette route. Le drapeau est posé par l'image et non par l'hébergeur, parce que l'image est le seul vecteur de déploiement : la même politique s'applique sur Render, Cloud Run ou Kubernetes sans que le code sache lequel l'exécute. Hors conteneur, la route reste ouverte — le service n'écoute alors que la boucle locale, et exiger une clé gênerait le développement sans rien protéger.
+
+| Contexte | `AGRITECH_LOGS_KEY` | `GET /logs` |
+|---|---|---|
+| hors conteneur | absente | **ouverte** |
+| hors conteneur | définie | protégée |
+| conteneur | définie | protégée |
+| conteneur | absente | **503** |
+
+Un service bâti sur une image **ne surveille pas le registre** : il la tire une fois, au déploiement, et repousser `latest` ne le réveille pas. C'est pourquoi la chaîne de livraison appelle son *deploy hook* après la publication — sans ce dernier pas, toute correction de l'API demanderait un clic dans un tableau de bord. Le redéploiement reste déclenchable à la main par *Manual Deploy → Deploy latest reference*.
 
 Un `GET /health` sur l'URL obtenue doit rendre **deux** provenances — `served_model` et `served_model_national`. Une seule signalerait une image mal construite.
 
@@ -230,11 +274,13 @@ Au-delà de sept jours, il faudrait diriger ces lignes vers une destination exte
 
 ### Variables d'environnement et secrets
 
-Le projet lit **cinq variables**, et aucune n'est un secret.
+Le projet lit **sept variables**. Une seule est un secret : `AGRITECH_LOGS_KEY`.
 
 | Variable | Lue par | Défaut | Rôle |
 |---|---|---|---|
 | `AGRITECH_API_URL` | `app/app.py` | `http://localhost:8000` | adresse du service, indispensable si l'interface et l'API ne sont pas sur la même machine |
+| `AGRITECH_LOGS_KEY` | `api/main.py` | absente | clé exigée dans l'en-tête `X-API-Key` pour lire `/logs` |
+| `AGRITECH_LOGS_REQUIRED` | `api/main.py` | posée par le `Dockerfile` | ferme `/logs` tant qu'aucune clé n'est fournie. Jamais à régler à la main : c'est l'image qui la porte |
 | `AGRITECH_API_TIMEOUT_S` | `app/app.py` | `10` | délai d'attente d'**un** appel, à relever face à un hébergement qui met le service en veille |
 | `AGRITECH_API_RETRIES` | `app/app.py` | `1` | essais avant d'abandonner — un seul en local, où une API absente doit se voir tout de suite |
 | `AGRITECH_MODEL_URI` | `api/service.py` | absente | bascule du joblib de parcelle vers le registre MLflow — `models:/agritech-rendement-api@champion` |
@@ -244,12 +290,15 @@ Deux variables de bascule et non une : les deux artefacts ont des registres dist
 
 Les deux réglages d'attente sont séparés pour la même raison : un délai long et un seul essai laisseraient l'écran muet pendant deux minutes avant d'échouer, là où plusieurs essais courts rendent la main et s'expliquent.
 
-Deux réglages sont en revanche nécessaires **côté GitHub**, pour que la livraison puisse publier :
+Trois réglages sont en revanche nécessaires **côté GitHub**, pour que la livraison puisse publier puis déployer :
 
 | Nom | Où | Valeur |
 |---|---|---|
 | `DOCKERHUB_USERNAME` | Settings → Secrets and variables → Actions → **Variables** | le nom de compte Docker Hub |
 | `DOCKERHUB_TOKEN` | idem → **Secrets** | un jeton dédié à la CI, niveau **Repo Read & Write** |
+| `RENDER_DEPLOY_HOOK` | idem → **Secrets** | l'URL de redéploiement du service, lue dans ses réglages chez l'hébergeur |
+
+Le *deploy hook* est un secret au sens plein : l'URL **vaut** droit de déploiement, sans autre authentification. Elle se régénère depuis les réglages du service, ce qui invalide l'ancienne — la révoquer ne coûte donc rien si elle venait à fuiter.
 
 Un jeton Docker Hub personnel ne peut pas être restreint à un seul dépôt : sa permission vaut pour tout le compte. D'où l'intérêt d'un jeton dédié, révocable sans toucher à l'usage quotidien, et du niveau minimal — jamais *Repo Read, Write, Delete*.
 
@@ -397,6 +446,8 @@ if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
 Une proposition de fusion construit donc son image et l'éprouve, mais ne touche ni aux identifiants ni au registre. L'image publiée n'est **jamais reconstruite** : `docker tag` renomme celle qui vient de passer les tests, de sorte que les octets publiés sont exactement les octets éprouvés.
 
+Un dernier pas appelle ensuite le *deploy hook* du service hébergé. Il confirme que le redéploiement est **demandé**, pas qu'il a abouti : un hook est asynchrone, et l'état du service se lit chez l'hébergeur. Mais un hook refusé — clé révoquée, service supprimé — fait échouer le job, ce qui est le cas qui compte : sans cela, le service continuerait de rendre l'image précédente sans que rien ne le signale.
+
 ### Ce qui n'est pas vérifié en intégration continue
 
 Dix tests sont ignorés sur un runner. Le résumé de chaque exécution les nomme, avec leur motif.
@@ -433,9 +484,9 @@ La chaîne GitHub Actions **n'interroge jamais MLflow** : elle emballe l'artefac
 1. promouvoir l'alias depuis le notebook de comparaison, avec `PUBLIER = True` ;
 2. `uv run python scripts/export_api_model.py`, qui réexporte l'artefact, sa provenance et son empreinte ;
 3. committer ce nouvel artefact ;
-4. laisser la chaîne construire et publier l'image.
+4. laisser la chaîne construire, publier l'image, puis demander le redéploiement du service.
 
-Déplacer un alias ne met à jour ni une image déjà publiée, ni un conteneur en fonctionnement. C'est ce qui rend chaque image traçable à un commit.
+Déplacer un alias ne met à jour ni une image déjà publiée, ni un service en fonctionnement : **c'est le commit de l'artefact qui déclenche tout**, jamais la promotion elle-même. C'est ce qui rend chaque image traçable à un commit — et ce qui évite qu'un alias déplacé par mégarde atteigne la production.
 
 ### Protection de `main`, épinglage et Dependabot
 

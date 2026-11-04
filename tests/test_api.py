@@ -56,6 +56,7 @@ from agritech.preprocessing import (
 )
 import scripts.export_api_model as export
 from api import journal, service
+from api import main as api_main
 from api.main import _charger, app
 from api.schemas import (CHAMP_VERS_VARIABLE, PredictionRequete,
                          RecommandationRequete)
@@ -1337,6 +1338,64 @@ def test_journal_ignore_les_routes_de_service(client, journal_vide):
     client.get("/model/info")
     client.get("/logs")
     assert client.get("/logs").json()["stored"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Le verrou du journal
+#
+# `/logs` est la seule route qui rende les budgets de ses appelants. Trois
+# situations, et une seule la rend : ouverte hors conteneur quand aucune clé
+# n'est configurée, protégée dès qu'une clé l'est, et **fermée** sur un
+# déploiement qui en exige une sans en fournir — un oubli de configuration ne
+# doit pas se solder par une fuite silencieuse.
+# --------------------------------------------------------------------------- #
+
+
+def test_le_journal_reste_ouvert_sans_cle_configuree(client, journal_vide):
+    """Hors conteneur et sans clé, pas de verrou : seule la boucle locale écoute."""
+    assert api_main.CLE_JOURNAL is None
+    assert api_main.JOURNAL_EXIGE_UNE_CLE is False
+    assert client.get("/logs").status_code == 200
+
+
+def test_le_journal_se_ferme_sur_un_deploiement_sans_cle(client, journal_vide,
+                                                         monkeypatch):
+    """Une image lancée sans clé refuse la route plutôt que de l'ouvrir.
+
+    C'est la politique que le `Dockerfile` impose en posant
+    `AGRITECH_LOGS_REQUIRED`. Un 503 et non un 401 : aucune clé ne
+    débloquerait cet appel, et réclamer une authentification impossible
+    induirait en erreur. C'est le déploiement qui est incomplet.
+    """
+    monkeypatch.setattr(api_main, "JOURNAL_EXIGE_UNE_CLE", True)
+
+    reponse = client.get("/logs")
+    assert reponse.status_code == 503
+    assert "AGRITECH_LOGS_KEY" in reponse.json()["detail"]
+
+
+def test_le_journal_refuse_une_cle_absente_ou_fausse(client, journal_vide,
+                                                     monkeypatch):
+    """Une URL publique ne doit pas livrer les prix et charges d'autrui."""
+    monkeypatch.setattr(api_main, "CLE_JOURNAL", "cle-de-deploiement")
+
+    absente = client.get("/logs")
+    assert absente.status_code == 401
+    assert "X-API-Key" in absente.json()["detail"]
+
+    # Un préfixe correct ne suffit pas — la comparaison porte sur le tout.
+    fausse = client.get("/logs", headers={"X-API-Key": "cle-de-deploiemen"})
+    assert fausse.status_code == 401
+
+
+def test_le_journal_accepte_la_cle_attendue(client, journal_vide, monkeypatch):
+    """Le verrou ne doit pas rendre la route inutilisable pour autant."""
+    monkeypatch.setattr(api_main, "CLE_JOURNAL", "cle-de-deploiement")
+
+    reponse = client.get("/logs",
+                         headers={"X-API-Key": "cle-de-deploiement"})
+    assert reponse.status_code == 200
+    assert reponse.json()["capacity"] == journal.CAPACITE
 
 
 def test_journal_borne_a_sa_capacite(journal_vide):

@@ -42,6 +42,12 @@ from pathlib import Path
 #: suivant plutôt que de laisser des conteneurs orphelins s'accumuler.
 CONTENEUR = "agritech-api-smoke"
 
+#: Clé donnée au conteneur pour éprouver le verrou de `/logs`. Sa valeur n'a
+#: aucune importance et n'en est pas une : ce qui est vérifié, c'est que la
+#: route refuse sans elle et répond avec. Une clé réelle vit chez
+#: l'hébergeur, jamais dans un dépôt.
+CLE_EPREUVE = "cle-d-epreuve-du-conteneur"
+
 #: Contexte au milieu du domaine d'entraînement : aucun avertissement attendu.
 CONTEXTE = {"rainfall_mm": 500.0, "temperature_celsius": 25.0,
             "fertilizer_used": True, "irrigation_used": False}
@@ -104,12 +110,13 @@ def port_libre() -> int:
         return prise.getsockname()[1]
 
 
-def appeler(port: int, chemin: str, charge=None, timeout: int = 20):
+def appeler(port: int, chemin: str, charge=None, timeout: int = 20,
+            entetes: dict | None = None):
     """GET, ou POST si une charge utile est fournie."""
     donnees = json.dumps(charge).encode() if charge is not None else None
     requete = urllib.request.Request(
         f"http://127.0.0.1:{port}{chemin}", data=donnees,
-        headers={"Content-Type": "application/json"})
+        headers={"Content-Type": "application/json", **(entetes or {})})
     with urllib.request.urlopen(requete, timeout=timeout) as reponse:
         return reponse.status, json.loads(reponse.read())
 
@@ -160,6 +167,7 @@ def eprouver_autonomie(image: str) -> None:
         "                  'numpy': numpy.__version__,\n"
         "                  'racine': str(PROJECT_ROOT),\n"
         "                  'artefact': API_MODEL_PATH.exists(),\n"
+        "                  'verrou': os.environ.get('AGRITECH_LOGS_REQUIRED'),\n"
         "                  'uid': os.getuid()}))"
     )
     acheve = docker("run", "--rm", "--entrypoint", "python", image,
@@ -176,6 +184,12 @@ def eprouver_autonomie(image: str) -> None:
     verifier("l'artefact est à sa place", etat["artefact"])
     verifier("le service ne tourne pas en root", etat["uid"] != 0,
              f"uid={etat['uid']}")
+    # Sans ce drapeau, une image déployée sans clé **ouvrirait** `/logs` au
+    # lieu de la fermer. C'est le `Dockerfile` qui le pose, et c'est donc ici
+    # qu'il faut le constater : aucun test unitaire ne lit l'image.
+    verifier("l'image ferme /logs tant qu'aucune clé n'est fournie",
+             etat["verrou"] == "1",
+             f"AGRITECH_LOGS_REQUIRED={etat['verrou']}")
     print(f"         python {etat['python']}  pandas {etat['pandas']}  "
           f"sklearn {etat['sklearn']}  numpy {etat['numpy']}")
 
@@ -194,6 +208,7 @@ def eprouver_service(image: str) -> None:
     # Volontairement sans `-v` : ni mlflow.db, ni mlartifacts, ni data. Si le
     # conteneur en avait besoin, il échouerait ici.
     lancement = docker("run", "-d", "--name", CONTENEUR,
+                       "-e", f"AGRITECH_LOGS_KEY={CLE_EPREUVE}",
                        "-p", f"127.0.0.1:{port}:8000", image)
     if lancement.returncode != 0:
         verifier("le conteneur démarre", False, lancement.stderr[-300:])
@@ -264,7 +279,17 @@ def eprouver_service(image: str) -> None:
 
         _eprouver_national(port, sante)
 
-        statut, journal = appeler(port, "/logs?limit=10")
+        # Le verrou de `/logs`, par ses deux faces. Sans clé, la route rendrait
+        # les budgets transmis à `/recommend` quelques lignes plus haut.
+        try:
+            appeler(port, "/logs")
+            verifier("/logs refuse un appel sans clé", False, "accepté")
+        except urllib.error.HTTPError as erreur:
+            verifier("/logs refuse un appel sans clé", erreur.code == 401,
+                     f"HTTP {erreur.code}")
+
+        statut, journal = appeler(port, "/logs?limit=10",
+                                  entetes={"X-API-Key": CLE_EPREUVE})
         verifier("/logs a enregistré les appels, refus compris",
                  statut == 200 and journal["stored"] >= 3,
                  f"{journal['returned']}/{journal['stored']} entrées")

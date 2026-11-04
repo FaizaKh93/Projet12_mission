@@ -17,6 +17,12 @@
 #
 #     docker build -t agritech-api .
 #     docker run --rm -p 8000:8000 agritech-api
+#
+# `GET /logs` répondra 503 : cette image ferme la route tant qu'aucune clé ne
+# lui est fournie (voir le bloc `ENV` plus bas). Pour l'ouvrir en local :
+#
+#     docker run --rm -p 8000:8000 -e AGRITECH_LOGS_KEY=essai agritech-api
+#     curl -H "X-API-Key: essai" http://localhost:8000/logs
 
 # Version corrective épinglée, et non `3.12-slim` : un pickle scikit-learn se
 # recharge sous l'environnement qui l'a produit, pas sous « à peu près ».
@@ -89,10 +95,18 @@ COPY --chown=agritech:agritech \
     models/modele_api_panel.joblib models/modele_api_panel.json \
     /app/models/
 
+# `AGRITECH_LOGS_REQUIRED` ferme `/logs` tant qu'aucune clé n'est fournie.
+# Il est posé **ici** et non chez l'hébergeur : l'image est le seul vecteur de
+# déploiement, donc c'est elle qui doit porter la politique. Un conteneur
+# lancé sans `AGRITECH_LOGS_KEY` refuse la route au lieu de livrer les budgets
+# de ses appelants — un oubli de configuration ne doit pas se solder par une
+# fuite silencieuse. Hors conteneur, la route reste ouverte : le service
+# n'écoute alors que la boucle locale.
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONPATH="/app/src:/app" \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    AGRITECH_LOGS_REQUIRED=1
 
 USER agritech
 EXPOSE 8000

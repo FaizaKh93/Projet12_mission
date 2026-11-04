@@ -41,16 +41,19 @@ La dérivation est donc un **transformateur ajusté sur les données d'entraîne
 
 ---
 
-## 3. Le contrat des six routes
+## 3. Le contrat des neuf routes
 
-| Route | Méthode | Ce qu'elle rend | Dépend du modèle |
+| Route | Méthode | Ce qu'elle rend | Modèle servi |
 |---|---|---|---|
-| `/predict` | POST | Le rendement d'une culture, avec son intervalle à 95 % | oui |
-| `/recommend` | POST | Les six cultures classées, et la comparaison économique | oui |
-| `/reference/prices` | GET | Les six prix à la production sourcés, avec leur dispersion | **non** |
-| `/model/info` | GET | Provenance du modèle servi et valeurs acceptées | oui |
-| `/health` | GET | Le service répond et son modèle est chargé | oui |
-| `/logs` | GET | Les derniers appels observés, succès **et** rejets | non |
+| `/predict` | POST | Le rendement d'une culture, avec son intervalle à 95 % | parcelle |
+| `/recommend` | POST | Les six cultures classées, et la comparaison économique | parcelle |
+| `/national/predict` | POST | Le rendement **national** d'une culture, l'année suivante | panel |
+| `/national/ranking` | POST | Les cultures d'un pays, classées par rendement estimé | panel |
+| `/national/series` | GET | Les couples (pays, culture) que le service sait prédire | panel |
+| `/reference/prices` | GET | Les six prix à la production sourcés, avec leur dispersion | **aucun** |
+| `/model/info` | GET | Provenance du modèle servi et valeurs acceptées | parcelle |
+| `/health` | GET | Le service répond et **ses deux modèles** sont chargés | les deux |
+| `/logs` | GET | Les derniers appels observés, succès **et** rejets | aucun |
 
 ### 3.1 `/predict` — une culture, un contexte
 
@@ -80,15 +83,43 @@ Chaque classement économique est soumis à un **test de sensibilité au prix** 
 
 *À gauche, les six cultures à conditions de parcelle identiques : six barres indiscernables. À droite, les marges calculées sur les six budgets de l'exemple documenté du contrat — de 214 à 725 €/ha. Même parcelle, même modèle : c'est l'économie qui départage, pas le rendement. Une culture dont le budget manque n'apparaît pas à droite ; l'API ne lui invente pas de marge.*
 
-### 3.3 `/reference/prices` — la seule route qui ne calcule rien
+### 3.3 Les trois routes `/national/*` — un autre modèle, une autre question
+
+Trois routes servent le **second artefact**, celui du panel FAO. Elles ne prolongent pas les précédentes : elles répondent à une autre question, sur une autre unité d'observation.
+
+`POST /national/predict` rend le rendement national d'une culture dans un pays, pour l'année qui suit le dernier relevé. L'appelant fournit **un pays et une culture, rien d'autre** : les trois derniers rendements connus sont cherchés dans la table embarquée dans l'artefact et rendus avec la réponse, pour que le chiffre se lise avec son historique. Aucune condition de culture n'est demandée — ce modèle n'en lit aucune.
+
+`POST /national/ranking` classe les cultures d'un pays par rendement estimé. Seules celles que le pays a effectivement cultivées entrent dans la comparaison : sans ce garde-fou, la France verrait le plantain en deuxième position, le modèle lui prêtant un historique qui n'est pas le sien. Le classement porte sur le rendement et non sur la rentabilité — il manque six prix sur dix pour ces cultures, et la réponse le dit.
+
+`GET /national/series` publie les couples (pays, culture) servables et l'année prédite. **Cette liste fait foi** : c'est la table embarquée dans l'artefact, la seule à savoir quelles séries ont un historique exploitable. Une interface qui recopierait des pays et des cultures proposerait tôt ou tard un couple que le modèle ne connaît pas.
+
+> **Les deux modèles ne se remplacent pas, et leurs erreurs ne se comparent pas.** Les routes sans préfixe servent un modèle de **parcelle** sur données **simulées** — « ce champ, dans ces conditions ». Les routes `/national/*` servent des rendements **observés**, mais à l'échelle d'un pays et d'une année — « ce pays, cette culture, l'an prochain ». Un rendement national n'est pas un rendement de parcelle, et aucune des deux réponses ne vaut pour l'autre.
+
+### 3.4 `/reference/prices` — la seule route qui ne calcule rien
 
 Elle répond même si l'artefact venait à manquer : ce sont des données externes, pas un résultat d'inférence. Son rôle est d'amorcer le champ *prix* des budgets de `/recommend` plutôt que de laisser l'utilisateur devant une case vide. La section 5 détaille d'où vient chaque chiffre.
 
-### 3.4 `/logs` — les rejets comptent autant que les succès
+### 3.5 `/logs` — les rejets comptent autant que les succès
 
 Les appels refusés y figurent. Un rejet renseigne sur ce que les utilisateurs saisissent mal, ce qu'un journal des seuls succès tairait. C'est la raison pour laquelle l'interception se fait en amont des routes : une requête invalide n'atteint jamais le code métier.
 
-> **Deux limites assumées, répétées dans la réponse elle-même.** Le journal vit dans la mémoire du processus : il disparaît au redémarrage, et chaque worker tient le sien. Et cette route **n'est protégée par rien**, alors qu'elle expose les budgets transmis à `/recommend` — les prix et les charges de ses utilisateurs. Elle ne doit pas être ouverte publiquement en l'état.
+> **Une limite assumée, répétée dans la réponse elle-même.** Le journal vit dans la mémoire du processus : il disparaît au redémarrage, et chaque worker tient le sien.
+
+**Cette route rend les budgets transmis à `/recommend`** — les prix et les charges de ses appelants. Elle exige donc l'en-tête `X-API-Key`, déclaré comme **schéma de sécurité** dans l'OpenAPI : Swagger affiche un cadenas sur la route et un bouton *Authorize* où la clé se saisit une fois, plutôt qu'un champ à remplir à chaque essai. Un client généré depuis le schéma sait ainsi qu'une clé est attendue.
+
+Le verrou connaît **trois états**, et le défaut est fermé.
+
+| Contexte | `AGRITECH_LOGS_KEY` | Réponse |
+|---|---|---|
+| hors conteneur | absente | la route rend le journal |
+| hors conteneur ou conteneur | définie | 401 sans la clé, 200 avec |
+| **conteneur** | **absente** | **503 — la route reste fermée** |
+
+Le dernier cas est le plus important, et il a été ajouté après coup : la première mise en ligne a ouvert la route sans que rien ne le signale. Un défaut ouvert transforme un oubli de configuration en fuite silencieuse. Le `Dockerfile` pose donc `AGRITECH_LOGS_REQUIRED`, et une image lancée sans clé refuse la route. Le drapeau vit dans l'**image** et non chez l'hébergeur, parce que l'image est le seul vecteur de déploiement : la politique vaut pour Render, Cloud Run ou Kubernetes sans que ce code ait à savoir lequel l'exécute. Hors conteneur, la route reste ouverte — le service n'écoute alors que la boucle locale.
+
+Le 503 n'est pas un 401 par négligence : aucune clé ne débloquerait cet appel, et réclamer une authentification impossible induirait en erreur. C'est le déploiement qui est incomplet, pas l'appelant.
+
+Ce n'est pas une authentification d'utilisateur, et le dossier ne le présente pas comme telle : une clé unique partagée ne distingue pas ses porteurs et ne se révoque qu'en bloc. C'est un verrou d'exploitation, dimensionné pour ce qu'il protège — un tampon de cent appels, vidé à chaque redémarrage. L'épreuve du conteneur vérifie les deux faces : que l'image porte bien le drapeau, et que la route refuse sans clé puis répond avec.
 
 ---
 

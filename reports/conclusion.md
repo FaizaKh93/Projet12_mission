@@ -11,14 +11,34 @@
 | **1** | Jeu de données consolidé | 999 769 parcelles, 13 variables explicatives et la cible |
 | | Référentiel par culture, dictionnaire des variables, panel FAO | reconstructibles par une commande |
 | **2** | Modèle de prédiction | régression régularisée, 0,40 t/ha d'erreur absolue moyenne |
-| | Journal d'expériences | 305 runs, métriques et paramètres tracés |
-| **3** | API de prédiction | six routes, contrat typé, journal des appels |
-| | Artefact de service | prétraitement et modèle gelés ensemble, scellé par une empreinte |
+| | Second modèle, sur le panel FAO | rendements nationaux observés, prolongés d'une année |
+| | Journal d'expériences | 619 runs sur deux expériences, métriques et paramètres tracés |
+| **3** | API de prédiction | neuf routes, **deux modèles servis**, contrat typé, journal des appels |
+| | Artefacts de service | prétraitement et modèle gelés ensemble, scellés par une empreinte |
 | | Image conteneurisée | autonome, sans registre ni base de données |
-| **4** | Interface utilisateur | deux parcours, aucune logique métier côté écran |
+| **4** | Interface utilisateur | trois parcours, aucune logique métier côté écran |
 | **5** | Chaîne d'industrialisation | documentée dans le `README.md` du dépôt |
+| | Déploiement public | API et interface en ligne, redéployées par la chaîne de livraison |
 
-La chaîne est complète : des six fichiers sources à une application qu'un agriculteur peut utiliser, chaque maillon se rejoue par une commande.
+La chaîne est complète : des six fichiers sources à une application qu'un agriculteur peut ouvrir dans son navigateur, chaque maillon se rejoue par une commande.
+
+---
+
+## La mise en production
+
+![Du poste au navigateur : ce qui produit les modèles, et ce qui les sert](figures/mlops_architecture.png)
+
+*Trois bandes, et une seule frontière qui compte : celle du milieu. Rien ne passe du poste à la production sans traverser un commit — déplacer un alias dans MLflow ne déploie rien, et le schéma ne propose aucune flèche qui contourne le dépôt. En bas, les deux hébergements sont indépendants : l'un tire une image, l'autre lit le dépôt.*
+
+L'API est servie depuis l'**image déjà éprouvée** par la chaîne d'intégration : l'hébergeur tire celle qui a passé les tests, aucune reconstruction n'intervient. Mais un service bâti sur une image ne surveille pas le registre — il faut le lui dire. La chaîne appelle donc son *deploy hook* après la publication, et la livraison va du commit au service sans intervention manuelle.
+
+L'interface est déployée depuis le dépôt et se met à jour à chaque poussée. Les deux composants restent indépendants — l'un en conteneur, l'autre non — et ne sont reliés que par une adresse.
+
+**Le journal écrit à deux destinations, qui ne portent pas la même chose.** Le tampon en mémoire garde les corps complets pour la route `/logs`, et disparaît à chaque redémarrage — c'est-à-dire souvent, puisque le service s'endort. La sortie standard ne reçoit que les métadonnées — route, méthode, statut, durée, identifiant d'appel — mais l'hébergeur les conserve plusieurs jours. La répartition est un choix de sécurité, non de confort : les corps de `/recommend` contiennent les prix et les charges de l'appelant, et les déverser dans un tableau de bord les y exposerait une semaine durant.
+
+![Le démarrage du service, tel que l'hébergeur le consigne](figures/deploiement_logs_render.png)
+
+*Les deux lignes `modele_charge` annoncent chacune leur artefact, sa version et sa provenance : c'est ce qui permet de savoir après coup quel modèle servait au moment d'un incident. Un échec de chargement serait consigné de la même façon, **avant** que le processus ne s'arrête — c'est la seule trace possible dans ce cas, puisqu'un conteneur qui refuse de démarrer ne répond à aucune route, pas même à sa propre sonde de santé.*
 
 ---
 
@@ -56,9 +76,9 @@ Quatre conditions, par ordre d'importance.
 
 **Des charges territorialisées.** Les prix servis sont des médianes mondiales, d'assise inégale — 11 pays déclarants pour le coton, 75 pour le maïs. Les charges, elles, n'ont aucune source : l'application les demande à l'utilisateur. Des références technico-économiques régionales rendraient la comparaison économique défendable au lieu d'illustrative.
 
-**Une protection du service.** La route `/logs` expose les budgets transmis par les utilisateurs — leurs prix et leurs charges — et **n'est protégée par rien**. En l'état, elle ne doit pas être ouverte publiquement. Avant toute exposition réelle, il faut une authentification, un contrôle d'accès, ou la désactivation pure et simple de cette route. C'est la limite la plus urgente de ce dossier.
+**Une véritable authentification.** La route `/logs` rend les budgets transmis par les utilisateurs — leurs prix et leurs charges. Le dossier identifiait là sa limite la plus urgente ; la mise en ligne l'a rendue concrète, et elle est désormais fermée par une clé exigée dans l'en-tête `X-API-Key`, activée par variable d'environnement sur le déploiement public. Mais une clé unique et partagée ne distingue pas ses porteurs, ne trace pas qui a lu quoi, et ne se révoque qu'en bloc. C'est un verrou d'exploitation, pas un contrôle d'accès : un service réellement ouvert demanderait des comptes, des rôles et une journalisation des consultations.
 
-**Un hébergement.** Aucune instance publique n'existe aujourd'hui. Les deux parcours documentés supposent une machine avec Python ou Docker ; un agriculteur ne peut donc pas se servir de l'outil sans installer quelque chose.
+**Un hébergement qui ne dort pas.** L'outil est désormais en ligne et ne demande plus rien à installer, mais sur des offres gratuites : le service s'endort après quinze minutes sans visite, et la première requête attend près d'une minute pendant qu'il se réveille. L'interface absorbe cette attente en réessayant d'elle-même, et l'annonce plutôt que de laisser un écran vide — mais une minute avant le premier chiffre reste incompatible avec un usage régulier.
 
 ---
 

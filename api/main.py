@@ -13,10 +13,13 @@ derrière une simple lenteur.
 from __future__ import annotations
 
 import logging
+import os
+import secrets
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
 from api.journal import (
@@ -214,6 +217,65 @@ Modele = Annotated[ModeleServi, Depends(_modele)]
 ModeleNational = Annotated[ModeleServi, Depends(_modele_national)]
 
 
+#: Clé exigée pour lire le journal. Ce n'est pas une authentification
+#: d'utilisateur : c'est un verrou d'exploitation sur la seule route qui rende
+#: les budgets de ses appelants.
+CLE_JOURNAL = os.environ.get("AGRITECH_LOGS_KEY")
+
+#: Posé par le `Dockerfile`, donc vrai sur **tout** déploiement : l'image en
+#: est le seul vecteur. Une image lancée sans clé **refuse** la route au lieu
+#: de l'ouvrir — un oubli de configuration ne doit pas se solder par une fuite
+#: silencieuse, et c'est exactement ce qui arriverait avec un défaut ouvert.
+#:
+#: Le drapeau ne nomme aucun hébergeur. Render, Cloud Run ou Kubernetes
+#: appliquent la même politique sans que ce code sache lequel l'exécute.
+#: Hors conteneur, la route reste ouverte : le service n'écoute alors que la
+#: boucle locale, et exiger une clé gênerait le développement sans rien
+#: protéger.
+JOURNAL_EXIGE_UNE_CLE = bool(os.environ.get("AGRITECH_LOGS_REQUIRED"))
+
+#: Déclaré en **schéma de sécurité** et non en simple en-tête : Swagger
+#: affiche alors un cadenas sur la route et un bouton « Authorize » où la clé
+#: se saisit une fois, au lieu d'un champ à remplir à chaque essai. Le schéma
+#: OpenAPI porte ainsi l'information qu'un client généré doit connaître.
+#:
+#: `auto_error=False` est nécessaire, pas décoratif : sans lui, FastAPI
+#: refuserait l'appel dès que l'en-tête manque, avant que la dépendance ait pu
+#: décider si une clé est seulement exigée — et le verrou est conditionnel.
+EN_TETE_CLE = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def _autoriser_journal(
+    cle: Annotated[str | None, Depends(EN_TETE_CLE)] = None,
+) -> None:
+    """Trois situations, et une seule rend le journal.
+
+    `compare_digest` plutôt que `!=` : comparer deux chaînes caractère par
+    caractère s'interrompt au premier écart, et la durée de la réponse
+    renseigne alors sur la longueur du préfixe correct. Le gain est théorique
+    sur un service comme celui-ci, mais le coût de bien faire est nul.
+    """
+    if not CLE_JOURNAL:
+        if JOURNAL_EXIGE_UNE_CLE:
+            # 503 et non 401 : aucune clé ne débloquerait cet appel, et
+            # réclamer une authentification impossible induirait en erreur.
+            # C'est le déploiement qui est incomplet, pas l'appelant.
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "Cette route rend les budgets transmis à /recommend. Aucune "
+                "clé n'est configurée sur ce déploiement : elle reste fermée "
+                "jusqu'à ce que `AGRITECH_LOGS_KEY` soit définie.")
+        return
+
+    if not (cle and secrets.compare_digest(cle, CLE_JOURNAL)):
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            "Cette route rend les budgets transmis à /recommend — les prix et "
+            "les charges de ses appelants. Ce déploiement exige l'en-tête "
+            "`X-API-Key`.",
+            headers={"WWW-Authenticate": "X-API-Key"})
+
+
 def _refuser(erreur: ValueError) -> HTTPException:
     """Une entrée que le transformateur refuse vient de l'appelant.
 
@@ -286,7 +348,13 @@ def health(modele: Modele, national: ModeleNational) -> EtatService:
 
 
 @app.get("/logs", tags=["service"],
-         summary="Les derniers appels métier reçus par le service")
+         summary="Les derniers appels métier reçus par le service",
+         dependencies=[Depends(_autoriser_journal)],
+         responses={
+             401: {"description": "Clé absente ou invalide, sur un "
+                                  "déploiement qui en exige une."},
+             503: {"description": "Déploiement sans clé configurée : la "
+                                  "route reste fermée plutôt qu'ouverte."}})
 def logs(limit: Annotated[int, Query(ge=1, le=CAPACITE)] = 20) -> JournalReponse:
     """Les derniers appels observés, le plus récent d'abord.
 
@@ -300,9 +368,10 @@ def logs(limit: Annotated[int, Query(ge=1, le=CAPACITE)] = 20) -> JournalReponse
 
     Deux limites, répétées dans `caveat` parce qu'elles comptent. Le tampon
     vit dans la mémoire du processus : il disparaît au redémarrage, et chaque
-    worker tient le sien. Et cette route n'est protégée par rien, alors
-    qu'elle expose les budgets transmis à `/recommend` — les prix et les
-    charges de ses utilisateurs.
+    worker tient le sien. Et cette route rend les budgets transmis à
+    `/recommend` — les prix et les charges de ses utilisateurs : elle exige
+    donc l'en-tête `X-API-Key` dès que `AGRITECH_LOGS_KEY` est définie, ce
+    qui doit être le cas de tout déploiement dont l'URL est publique.
     """
     entrees = lire(limit)
     return JournalReponse(

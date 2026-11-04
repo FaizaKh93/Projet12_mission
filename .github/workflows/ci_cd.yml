@@ -1,13 +1,16 @@
 # Chaîne d'intégration (CI) et de livraison (CD) d'Agritech Answers.
 #
 #   CI — ce qui vérifie      tests · dérive des dépendances · image et conteneur
-#   CD — ce qui livre        publication de l'image sur Docker Hub
+#   CD — ce qui livre        publication sur Docker Hub, puis redéploiement du
+#                            service — un registre à jour ne sert rien tant que
+#                            l'hébergeur n'a pas retiré l'image
 #
 # La CI tourne partout. La CD ne tourne que sur `main`, jamais depuis une
 # proposition de fusion. Aucun modèle n'est entraîné ni promu ici : la chaîne
 # MLOps est un travail distinct, déclenché à la main.
 #
 #   Secrets     DOCKERHUB_TOKEN      (Settings → Secrets)
+#               RENDER_DEPLOY_HOOK   l'URL vaut droit de déploiement
 #   Variables   DOCKERHUB_USERNAME   (Settings → Variables)
 #
 # Toutes les actions sont épinglées sur un SHA de commit. Une étiquette,
@@ -284,6 +287,17 @@ jobs:
           docker push "$DEPOT:latest"
           docker push "$DEPOT:${{ github.sha }}"
 
+      # Un service bâti sur une image ne surveille pas le registre : sans ce
+      # pas, la chaîne s'arrêterait à Docker Hub. L'appel est asynchrone — le
+      # redéploiement est demandé, pas constaté — mais `-f` fait échouer le job
+      # si le hook est refusé : une clé révoquée laisserait sinon le service
+      # rendre l'image d'avant. La sortie est jetée, le journal est public.
+      - name: CD — Demander le redéploiement du service
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: curl -fsS -X POST "$HOOK" > /dev/null
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+
       # `always() &&` : sans lui, un pas conditionnel est implicitement
       # `success() && …` et ne s'exécuterait pas après un échec — c'est-à-dire
       # jamais quand le récapitulatif sert le plus.
@@ -299,8 +313,12 @@ jobs:
               echo
               echo "- \`$DEPOT:latest\`"
               echo "- \`$DEPOT:${{ github.sha }}\`"
+              echo
+              echo "Redéploiement **demandé** à l'hébergeur. Qu'il ait abouti"
+              echo "se lit dans son tableau de bord, pas ici."
             else
-              echo "Échec. Vérifier la variable \`DOCKERHUB_USERNAME\` et le"
-              echo "secret \`DOCKERHUB_TOKEN\` dans les réglages du dépôt."
+              echo "Échec. Vérifier la variable \`DOCKERHUB_USERNAME\` et les"
+              echo "secrets \`DOCKERHUB_TOKEN\` et \`RENDER_DEPLOY_HOOK\` dans"
+              echo "les réglages du dépôt."
             fi
           } >> "$GITHUB_STEP_SUMMARY"

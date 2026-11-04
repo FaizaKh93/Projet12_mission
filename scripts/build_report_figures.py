@@ -504,16 +504,16 @@ def figure_architecture() -> None:
             "Lit les résultats",
             "Emporte le CSV"], GRIS, "#ffffff"),
         ("streamlit", 0.245, 0.265, "Streamlit — app/app.py", [
-            "Formulaire, graphiques, export",
-            "Bornes et cultures lues dans l'API",
+            "Trois modes, graphiques, export",
+            "Cultures, bornes et pays lus dans l'API",
             "",
             "Aucune logique de modèle :",
             "rien n'est calculé ici"], BLUE, "#f7fafc"),
         ("fastapi", 0.645, 0.340, "FastAPI — service de prédiction", [
-            "/predict · un rendement et sa fourchette",
-            "/recommend · les six cultures, les marges",
-            "/model/info · le contrat et la provenance",
-            "/reference/prices · les prix FAOSTAT",
+            "/predict · /recommend — la parcelle",
+            "/national/predict · /national/ranking",
+            "/national/series — le panel FAO",
+            "/model/info · /reference/prices",
             "",
             "/health · /logs — supervision"], ORANGE, "#fffaf0"),
     )
@@ -525,8 +525,8 @@ def figure_architecture() -> None:
 
     # --- Ce que l'API a derrière elle ------------------------------------- #
     for x, titre, lignes in (
-        (0.645, "Modèle Ridge", ["Artefact .joblib versionné",
-                                 "embarqué dans l'image"]),
+        (0.645, "Deux artefacts .joblib", ["Parcelle et panel FAO, scellés",
+                                           "et embarqués dans l'image"]),
         (0.830, "Référentiel FAOSTAT", ["Prix 2024, médiane mondiale",
                                         "re-dérivable par script"]),
     ):
@@ -567,8 +567,137 @@ def figure_architecture() -> None:
     enregistrer(figure, "app_architecture.png")
 
 
+def figure_chaine_mlops() -> None:
+    """Du poste au navigateur : ce qui produit les modèles, et ce qui les sert.
+
+    `app_architecture.png` répond à « qui parle à qui pendant un appel ».
+    Celle-ci répond à l'autre question : **comment le code et les modèles
+    arrivent en production**. Les réunir en un seul schéma mêlerait un flux de
+    requêtes — quelques millisecondes, plusieurs fois par minute — à un flux
+    de livraison, qui se compte en commits.
+
+    **La frontière qui compte est celle du milieu** : rien ne passe du poste à
+    la production sans traverser un commit. Déplacer un alias dans MLflow ne
+    déploie rien, et c'est le fait le plus contre-intuitif de la chaîne. Le
+    schéma le montre en n'offrant aucune flèche qui contourne GitHub.
+
+    Métriques locales plutôt que `_boite` : trois bandes empilées demandent
+    des blocs bien plus plats que les schémas à une rangée, et la figure est
+    haute pour que le texte reste lisible malgré des hauteurs relatives
+    réduites.
+    """
+    ligne, entete, marge = 0.035, 0.058, 0.022
+
+    def bloc(x, y, largeur, titre, lignes, couleur, fond="#ffffff") -> None:
+        haut = entete + len(lignes) * ligne + marge
+        ax.add_patch(FancyBboxPatch(
+            (x, y), largeur, haut, boxstyle="round,pad=0.008",
+            linewidth=1.6, edgecolor=couleur, facecolor=fond, zorder=2))
+        ax.text(x + largeur / 2, y + haut - 0.018, titre, ha="center",
+                va="top", fontsize=10.5, fontweight="bold", color=couleur,
+                zorder=3)
+        for index, texte in enumerate(lignes):
+            ax.text(x + 0.016, y + haut - entete - index * ligne, texte,
+                    ha="left", va="top", fontsize=9.2, color=GRIS, zorder=3)
+
+    def fleche(depart, arrivee, style="-|>") -> None:
+        ax.add_patch(FancyArrowPatch(
+            depart, arrivee, arrowstyle=style, mutation_scale=15,
+            linewidth=1.4, color=GRIS_CLAIR, zorder=1))
+
+    def bande(y, numero, titre) -> None:
+        # Fond blanc opaque et zorder élevé : les deux descentes vers la
+        # production sont diagonales et passeraient sinon **au travers** du
+        # titre de la bande qu'elles rejoignent.
+        ax.text(0.015, y, f"{numero}  ·  {titre}", ha="left", va="bottom",
+                fontsize=11.5, fontweight="bold", color=GRIS, zorder=4,
+                bbox=dict(facecolor="white", edgecolor="none", pad=3))
+
+    figure, ax = plt.subplots(figsize=(14, 8.6))
+    figure.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis("off")
+    ax.grid(False)
+
+    # --- 1. Le poste : tout ce qui n'atteint jamais la production --------- #
+    bande(0.960, "1", "Sur le poste — la chaîne MLOps, rejouable par commande")
+    for x, titre, lignes in (
+        (0.015, "Données sources", ["999 769 parcelles simulées",
+                                    "+ panel FAO observé"]),
+        (0.265, "Préparation et découpage", ["Deux chaînes, deux découpages :",
+                                             "aléatoire · chronologique"]),
+        (0.515, "Entraînement et sélection", ["Optuna, 619 runs tracés,",
+                                              "quatre modèles comparés"]),
+        (0.765, "MLflow — registres", ["Deux registres, alias champion,",
+                                       "puis export scellé par empreinte"]),
+    ):
+        bloc(x, 0.790, 0.220, titre, lignes, GRIS, "#f7fafc")
+    for depart in (0.235, 0.485, 0.735):
+        fleche((depart, 0.865), (depart + 0.030, 0.865))
+
+    # --- La seule frontière : un commit ---------------------------------- #
+    # Elle vise le **dépôt**, pas la CI : un commit arrive dans le dépôt, qui
+    # déclenche la CI ensuite — ce second lien est déjà dessiné plus bas.
+    fleche((0.165, 0.790), (0.165, 0.640))
+    ax.text(0.190, 0.715, "commit de l'artefact exporté — un alias déplacé "
+            "ne déploie rien", ha="left", va="center", fontsize=9.4,
+            color=GRIS, style="italic")
+
+    # --- 2. GitHub : ce qui vérifie, puis ce qui livre -------------------- #
+    bande(0.655, "2", "GitHub — intégration continue, puis livraison")
+    for x, largeur, titre, lignes in (
+        (0.015, 0.300, "Dépôt", ["Code, artefacts, rapports",
+                                 "`main` protégée par la CI"]),
+        (0.355, 0.300, "CI — ce qui vérifie", ["302 tests, couverture ≥ 90 %,",
+                                               "image et conteneur éprouvés"]),
+        (0.705, 0.280, "Docker Hub", ["`latest` + SHA du commit :",
+                                      "l'image éprouvée, non rebâtie"]),
+    ):
+        bloc(x, 0.485, largeur, titre, lignes, BLUE, "#f7fafc")
+    fleche((0.315, 0.560), (0.355, 0.560))
+    fleche((0.655, 0.560), (0.705, 0.560))
+
+    # --- 3. En ligne : deux hébergeurs, aucune machine à installer -------- #
+    bande(0.295, "3", "En ligne — ce que l'agriculteur atteint sans rien "
+                      "installer")
+    for x, largeur, titre, lignes in (
+        (0.015, 0.220, "Navigateur", ["Un lien, aucune installation,",
+                                      "aucun compte à créer"]),
+        (0.285, 0.300, "Streamlit Community Cloud", [
+            "Interface, trois modes",
+            "Redéployée à chaque poussée"]),
+        (0.645, 0.340, "Render — FastAPI", [
+            "Neuf routes, deux modèles servis",
+            "Image tirée, jamais reconstruite"]),
+    ):
+        bloc(x, 0.125, largeur, titre, lignes, ORANGE, "#fffaf0")
+    fleche((0.235, 0.200), (0.285, 0.200))
+    fleche((0.585, 0.218), (0.645, 0.218))
+    fleche((0.645, 0.172), (0.585, 0.172))
+    ax.text(0.615, 0.247, "HTTP", ha="center", fontsize=8.8, color=GRIS,
+            style="italic")
+
+    # Les deux descentes vers la production, qui ne partent pas du même bloc.
+    fleche((0.165, 0.485), (0.400, 0.278))
+    ax.text(0.185, 0.370, "webhook", ha="left", fontsize=9.2, color=GRIS,
+            style="italic")
+    fleche((0.845, 0.485), (0.815, 0.278))
+    ax.text(0.860, 0.370, "deploy hook", ha="left", fontsize=9.2, color=GRIS,
+            style="italic")
+
+    figure.text(0.015, 0.055,
+                "Les deux hébergements sont indépendants : l'un tire une "
+                "image, l'autre lit le dépôt. Ce qui les relie n'est pas un "
+                "réseau partagé mais une adresse — et c'est ce qui permet de "
+                "remplacer l'un sans toucher à l'autre.",
+                fontsize=9, color=GRIS, style="italic", va="top")
+
+    enregistrer(figure, "mlops_architecture.png")
+
+
 def main() -> int:
-    """Charge le modèle une fois, puis trace les cinq figures."""
+    """Charge le modèle une fois, puis trace les six figures."""
     sns.set_theme(style="whitegrid", palette="deep")
     plt.rcParams["figure.dpi"] = 110
 
@@ -585,6 +714,7 @@ def main() -> int:
     figure_rendement_vs_marge(modele)
     figure_prix()
     figure_architecture()
+    figure_chaine_mlops()
     return 0
 
 

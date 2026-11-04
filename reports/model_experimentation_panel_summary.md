@@ -51,7 +51,7 @@ Trois décisions méritent d'être explicitées, parce qu'elles écartent chacun
 
 ## 3. L'entraînement et le modèle retenu
 
-Quatre modèles ont été entraînés sur la première partition, puis départagés sur la deuxième. La démarche est identique à celle de la première chaîne : recherche automatique d'hyperparamètres par Optuna, 100 essais par modèle, graines fixées, et **305 expérimentations enregistrées** — quatre études et leurs 301 essais — dans un registre MLflow distinct de celui de la chaîne simulée.
+Quatre modèles ont été entraînés sur la première partition, puis départagés sur la deuxième. La démarche est identique à celle de la première chaîne : recherche automatique d'hyperparamètres par Optuna, 100 essais par modèle, graines fixées, et **311 expérimentations enregistrées** — 302 essais, leurs runs parents, l'évaluation finale et les exports — dans une expérience MLflow distincte de celle de la chaîne simulée.
 
 | Modèle | RMSE validation | MAE validation | Variation expliquée |
 |---|---|---|---|
